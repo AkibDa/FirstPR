@@ -54,31 +54,45 @@ async def load_repo(req: RepoLoadRequest):
         "tree": tree,
     }
 
+
 @router.post("/analyze-issue")
 async def analyze_issue(req: AnalyzeRequest):
-    if not validate_github_url(req.repo_url):
-        raise HTTPException(400, "Invalid GitHub URL")
+  if not validate_github_url(req.repo_url):
+    raise HTTPException(400, "Invalid GitHub URL")
 
-    cache_key = req.repo_url.rstrip("/")
-    if cache_key not in repo_cache:
-        raise HTTPException(400, "Repository not loaded. Call /api/load-repo first.")
+  cache_key = req.repo_url.rstrip("/")
+  if cache_key not in repo_cache:
+    raise HTTPException(400, "Repository not loaded. Call /api/load-repo first.")
 
-    entry = repo_cache[cache_key]
-    qe = entry["query_engine"]
-    tree = entry["tree"]
+  entry = repo_cache[cache_key]
+  qe = entry["query_engine"]
+  tree = entry["tree"]
+  content = entry["content"]  # Pull the massive string payload from cache
 
-    issue_full = f"Title: {req.issue_title}\n\n{req.issue_text}" if req.issue_title else req.issue_text
+  issue_full = f"Title: {req.issue_title}\n\n{req.issue_text}" if req.issue_title else req.issue_text
 
-    analysis = run_issue_analyzer(qe, tree, issue_full)
-    retrieval = run_retrieval_agent(qe, issue_full)
-    reasoning = run_reasoning_agent(qe, tree, issue_full)
+  # Agent 1: Analyze the issue
+  analysis = run_issue_analyzer(qe, tree, issue_full)
 
-    return {
-        "repo_name": get_repo_name(req.repo_url),
-        "analysis": analysis,
-        "retrieval": retrieval,
-        "reasoning": reasoning,
-    }
+  # Agent 2: Retrieve relevant file paths
+  retrieval = run_retrieval_agent(qe, issue_full)
+
+  # Extract the file paths safely from Agent 2's JSON output
+  retrieved_files = []
+  if "relevant_files" in retrieval:
+    for f in retrieval["relevant_files"]:
+      if "path" in f:
+        retrieved_files.append(f["path"])
+
+  # Agent 3: Explain the codebase using the strict data flow
+  reasoning = run_reasoning_agent(tree, retrieved_files, content, issue_full)
+
+  return {
+    "repo_name": get_repo_name(req.repo_url),
+    "analysis": analysis,
+    "retrieval": retrieval,
+    "reasoning": reasoning,
+  }
 
 @router.get("/health")
 async def health():
