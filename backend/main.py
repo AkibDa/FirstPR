@@ -5,7 +5,7 @@ from api import router
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="GitHub Issue Navigator API")
+app = FastAPI(title="FirstPR")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,5 +15,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include the routes defined in api.py
+@app.get("/")
+def root():
+    return {"message": "Welcome to FirstPR API"}
+
 app.include_router(router)

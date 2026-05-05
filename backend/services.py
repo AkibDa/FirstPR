@@ -3,7 +3,10 @@ import tempfile
 import json
 import re
 import logging
-from gitingest import ingest
+from typing import List
+from pydantic import BaseModel, Field
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import Settings
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
 from llama_index.core.node_parser import MarkdownNodeParser
 
@@ -11,6 +14,16 @@ logger = logging.getLogger(__name__)
 
 # In-memory cache
 repo_cache: dict = {}
+
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name="BAAI/bge-base-en-v1.5"
+)
+
+# Define your strict output schema
+class CodeExplanation(BaseModel):
+    explanation: str = Field(description="Plain English explanation of what the code does.")
+    logic_trace: List[str] = Field(description="Step-by-step logic trace of the files.")
+    contribution_path: List[dict] = Field(description="Actionable steps for the user.")
 
 def build_query_engine(content: str, repo_name: str):
     with tempfile.TemporaryDirectory() as tmp:
@@ -23,7 +36,7 @@ def build_query_engine(content: str, repo_name: str):
         index = VectorStoreIndex.from_documents(
             documents=docs,
             transformations=[node_parser],
-            show_progress=False,
+            show_progress=True,
         )
         return index.as_query_engine(streaming=False)
 
@@ -80,7 +93,16 @@ Analyze the repository and return ONLY valid JSON (no markdown):
         logger.warning(f"Retrieval agent failed: {e}")
         return {}
 
-def run_reasoning_agent(qe, tree: str, issue_full: str) -> dict:
+def run_reasoning_agent(qe, tree: str,retrieved_files: List[str], repo_tmp_dir: str, issue_full: str) -> dict:
+  code_context = ""
+  for file_path in retrieved_files:
+    full_path = os.path.join(repo_tmp_dir, file_path)
+    try:
+      with open(full_path, 'r', encoding='utf-8') as f:
+        code_context += f"\n--- File: {file_path} ---\n{f.read()}\n"
+    except FileNotFoundError:
+      continue
+
     prompt = f"""
 You are an expert code mentor helping a beginner open-source contributor solve a GitHub issue.
 
@@ -104,9 +126,12 @@ Provide a clear, actionable contribution guide. Return ONLY valid JSON (no markd
 }}
 """
     try:
-        resp = qe.query(prompt)
-        json_match = re.search(r'\{.*\}', str(resp), re.DOTALL)
-        return json.loads(json_match.group()) if json_match else {}
+      # 3. Request Structured Output from local Ollama
+      response = Settings.llm.structured_predict(
+        CodeExplanation,
+        prompt=prompt
+      )
+      return response.dict()
     except Exception as e:
-        logger.warning(f"Reasoning agent failed: {e}")
-        return {"explanation": "Analysis unavailable"}
+      # Handle timeouts or parsing errors
+      return {"explanation": f"Failed to generate explanation from local model: {str(e)}"}

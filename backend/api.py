@@ -2,10 +2,10 @@ import logging
 from fastapi import APIRouter, HTTPException
 from schemas import RepoLoadRequest, AnalyzeRequest
 from utils import validate_github_url, get_repo_name
+from gitingest import ingest_async
 from services import (
     repo_cache,
     build_query_engine,
-    ingest,
     run_issue_analyzer,
     run_retrieval_agent,
     run_reasoning_agent
@@ -29,7 +29,7 @@ async def load_repo(req: RepoLoadRequest):
         }
 
     try:
-        summary, tree, content = ingest(req.repo_url)
+        summary, tree, content = await ingest_async(req.repo_url)
     except Exception as e:
         logger.error(f"gitingest error: {e}")
         raise HTTPException(500, f"Failed to ingest repo: {str(e)}")
