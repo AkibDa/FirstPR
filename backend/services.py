@@ -25,7 +25,7 @@ Settings.embed_model = HuggingFaceEmbedding(
 
 # 2. Configure Local LLM (Ollama via Mac)
 Settings.llm = Ollama(
-  model="llama3.1",
+  model="llama3.2:3b",
   base_url="http://localhost:11434",
   request_timeout=300.0,
   json_mode=True
