@@ -1,61 +1,71 @@
-import os
-import tempfile
 import json
 import re
 import logging
 from typing import List
 from pydantic import BaseModel, Field
 
-# Ensure Ollama is imported
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core import Settings
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
+from llama_index.core import Settings, PromptTemplate, Document
+from llama_index.core import VectorStoreIndex
 from llama_index.core.node_parser import MarkdownNodeParser
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache
 repo_cache: dict = {}
 
-# 1. Configure Embedding Model
 Settings.embed_model = HuggingFaceEmbedding(
   model_name="BAAI/bge-base-en-v1.5"
 )
 
-# 2. Configure Local LLM (Ollama via Mac)
 Settings.llm = Ollama(
   model="llama3.2:3b",
   base_url="http://localhost:11434",
-  request_timeout=300.0,
-  json_mode=True
+  request_timeout=600.0,
+  context_window=8192
 )
 
-
-# Define strict output schema
 class CodeExplanation(BaseModel):
   explanation: str = Field(description="Plain English explanation of what the code does.")
   logic_trace: List[str] = Field(description="Step-by-step logic trace of the files.")
   contribution_path: List[dict] = Field(description="Actionable steps for the user.")
 
-
 def build_query_engine(content: str, repo_name: str):
-  with tempfile.TemporaryDirectory() as tmp:
-    path = os.path.join(tmp, f"{repo_name}.md")
-    with open(path, "w", encoding="utf-8") as f:
-      f.write(content)
-    loader = SimpleDirectoryReader(input_dir=tmp)
-    docs = loader.load_data()
-    node_parser = MarkdownNodeParser()
-    index = VectorStoreIndex.from_documents(
-      documents=docs,
-      transformations=[node_parser],
-      show_progress=True,
-    )
-    return index.as_query_engine(streaming=False)
+  docs = []
+
+  parts = re.split(r"================================================\n(?:File|FILE|file):\s*", content)
+
+  for part in parts:
+    if not part.strip() or "Directory structure:" in part:
+      continue
+
+    subparts = part.split("\n================================================\n", 1)
+    if len(subparts) == 2:
+      file_path = subparts[0].strip()
+      code_text = subparts[1].strip()
+      docs.append(Document(text=code_text, metadata={"file_path": file_path}))
+
+  node_parser = MarkdownNodeParser()
+  index = VectorStoreIndex.from_documents(
+    documents=docs,
+    transformations=[node_parser],
+    show_progress=False,
+  )
+  return index.as_query_engine(streaming=False, similarity_top_k=5)
 
 
-def run_issue_analyzer(qe, tree: str, issue_full: str) -> dict:
+def extract_json(text: str) -> dict:
+  try:
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+      return json.loads(match.group())
+    return {}
+  except Exception as e:
+    logger.warning(f"JSON parsing error: {e}")
+    return {}
+
+
+def run_issue_analyzer(tree: str, issue_full: str) -> dict:
   prompt = f"""
 You are an expert open-source contributor mentor. Analyze the following GitHub issue and return a structured JSON response.
 
@@ -65,7 +75,7 @@ Repository structure:
 Issue:
 {issue_full}
 
-Return ONLY valid JSON (no markdown, no code fences) with this structure:
+Return ONLY valid JSON (no markdown) with this structure:
 {{
   "issue_type": "bug|feature|docs|refactor|test",
   "difficulty": "beginner|intermediate|advanced",
@@ -77,55 +87,50 @@ Return ONLY valid JSON (no markdown, no code fences) with this structure:
 }}
 """
   try:
-    resp = qe.query(prompt)
-    json_match = re.search(r'\{.*\}', str(resp), re.DOTALL)
-    return json.loads(json_match.group()) if json_match else {}
+    resp = Settings.llm.complete(prompt)
+    return extract_json(str(resp))
   except Exception as e:
     logger.warning(f"Issue analysis failed: {e}")
     return {}
 
-
 def run_retrieval_agent(qe, issue_full: str) -> dict:
-  prompt = f"""
-You are a code retrieval expert. Given this GitHub issue, identify the most relevant files and functions.
-
-Issue:
-{issue_full}
-
-Analyze the repository and return ONLY valid JSON (no markdown):
-{{
-  "relevant_files": [
-    {{"path": "src/example.py", "relevance": "high|medium|low", "reason": "why this file matters"}}
-  ],
-  "key_functions": ["functionName1", "functionName2"],
-  "search_keywords": ["keyword1", "keyword2", "keyword3"]
-}}
-"""
   try:
-    resp = qe.query(prompt)
-    json_match = re.search(r'\{.*\}', str(resp), re.DOTALL)
-    return json.loads(json_match.group()) if json_match else {}
+    nodes = qe.retriever.retrieve(issue_full)
+    relevant_files = []
+    seen = set()
+
+    for node in nodes:
+      path = node.metadata.get("file_path")
+      if path and path not in seen:
+        seen.add(path)
+        relevant_files.append({
+          "path": path,
+          "relevance": "high",
+          "reason": f"Semantic match score: {node.score:.2f}" if node.score else "Semantic match"
+        })
+
+    return {
+      "relevant_files": relevant_files,
+      "key_functions": [],
+      "search_keywords": []
+    }
   except Exception as e:
     logger.warning(f"Retrieval agent failed: {e}")
     return {}
 
-
-# 3. Fixed Signature and Indentation
 def run_reasoning_agent(tree: str, retrieved_files: List[str], repo_content: str, issue_full: str) -> dict:
   code_context = ""
 
-  # Extract file text directly from the gitingest string payload
-  # gitingest separates files using 48 equal signs
-  file_blocks = repo_content.split("================================================")
+  parts = re.split(r"================================================\n(?:File|FILE|file):\s*", repo_content)
 
-  for file_path in retrieved_files:
-    for block in file_blocks:
-      if file_path in block:
-        code_context += f"\n--- File: {file_path} ---\n{block.strip()}\n"
-        break  # Move to the next file once found
+  for part in parts:
+    subparts = part.split("\n================================================\n", 1)
+    if len(subparts) == 2:
+      file_path = subparts[0].strip()
+      if file_path in retrieved_files:
+        code_context += f"\n--- File: {file_path} ---\n{subparts[1].strip()[:4000]}\n"
 
-  # UN-INDENTED prompt so it runs after all files are collected
-  prompt = f"""
+  prompt_str = f"""
 You are an expert code mentor helping a beginner open-source contributor solve a GitHub issue.
 
 Repository tree:
@@ -137,13 +142,14 @@ Issue:
 Relevant Source Code:
 {code_context}
 
-Provide a clear, actionable contribution guide. Return ONLY valid JSON (no markdown).
+Provide a clear, actionable contribution guide. Return ONLY valid JSON.
 """
+  prompt_tmpl = PromptTemplate(prompt_str)
+
   try:
-    # Request Structured Output from local Ollama
     response = Settings.llm.structured_predict(
       CodeExplanation,
-      prompt=prompt
+      prompt=prompt_tmpl
     )
     return response.dict()
   except Exception as e:

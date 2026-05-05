@@ -17,7 +17,6 @@ from services import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
-
 @router.post("/load-repo")
 async def load_repo(req: RepoLoadRequest):
   if not validate_github_url(req.repo_url):
@@ -50,7 +49,6 @@ async def load_repo(req: RepoLoadRequest):
 
       logger.info("Clone successful. Passing local path to gitingest...")
 
-      # Feed the LOCAL path to gitingest instead of the URL
       summary, tree, content = await ingest_async(repo_path)
 
   except Exception as e:
@@ -89,24 +87,20 @@ async def analyze_issue(req: AnalyzeRequest):
   entry = repo_cache[cache_key]
   qe = entry["query_engine"]
   tree = entry["tree"]
-  content = entry["content"]  # Pull the massive string payload from cache
+  content = entry["content"]
 
   issue_full = f"Title: {req.issue_title}\n\n{req.issue_text}" if req.issue_title else req.issue_text
 
-  # Agent 1: Analyze the issue
-  analysis = run_issue_analyzer(qe, tree, issue_full)
+  analysis = run_issue_analyzer(tree, issue_full)
 
-  # Agent 2: Retrieve relevant file paths
   retrieval = run_retrieval_agent(qe, issue_full)
 
-  # Extract the file paths safely from Agent 2's JSON output
   retrieved_files = []
   if "relevant_files" in retrieval:
     for f in retrieval["relevant_files"]:
       if "path" in f:
         retrieved_files.append(f["path"])
 
-  # Agent 3: Explain the codebase using the strict data flow
   reasoning = run_reasoning_agent(tree, retrieved_files, content, issue_full)
 
   return {
