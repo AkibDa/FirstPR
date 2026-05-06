@@ -503,3 +503,35 @@ Rules:
         result["suggested_patch"] = patch
 
     return result
+
+def run_repo_qa(engine_bundle: dict, question: str) -> dict:
+  """
+  Answers a free-form question about the repository using the RAG pipeline.
+  """
+  retrieval = run_retrieval_agent(engine_bundle, question)
+  retrieved_files = [f["path"] for f in retrieval.get("relevant_files", [])]
+
+  sources: Dict[str, str] = engine_bundle["sources"]
+  code_context = _build_code_context(retrieved_files, sources, max_chars_per_file=2500)
+
+  prompt = f"""
+You are an expert AI mentor helping a developer understand a codebase. 
+Answer the user's question clearly and accurately using ONLY the provided source code context.
+
+Question: {question}
+
+Relevant source code:
+{code_context}
+
+If the answer cannot be found in the provided context, politely say so. Provide code examples from the context if it helps clarify your answer. Format your response in clean Markdown.
+"""
+  try:
+    answer = str(Settings.llm.complete(prompt)).strip()
+  except Exception as exc:
+    logger.error(f"QA agent error: {exc}")
+    answer = "I encountered an error while trying to generate an answer."
+
+  return {
+    "answer": answer,
+    "relevant_files": retrieved_files
+  }

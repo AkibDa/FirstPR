@@ -5,7 +5,7 @@ import tempfile
 
 from fastapi import APIRouter, HTTPException, Query
 
-from schemas import AnalyzeRequest, RepoLoadRequest
+from schemas import AnalyzeRequest, RepoLoadRequest, RepoQARequest
 from utils import validate_github_url, get_repo_name, fetch_github_issue
 from gitingest import ingest_async
 from services import (
@@ -14,6 +14,7 @@ from services import (
     run_issue_analyzer,
     run_retrieval_agent,
     run_reasoning_agent,
+    run_repo_qa,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,33 @@ async def analyze_issue(
         "analysis":  analysis,
         "retrieval": retrieval,
         "reasoning": reasoning,
+    }
+
+@router.post("/ask")
+async def ask_repo(req: RepoQARequest):
+    """
+    Ask a general question about a loaded repository.
+    """
+    if not validate_github_url(req.repo_url):
+        raise HTTPException(400, "Invalid GitHub URL")
+
+    cache_key = req.repo_url.rstrip("/")
+    if cache_key not in repo_cache:
+        raise HTTPException(
+            400,
+            "Repository not loaded. Call POST /api/load-repo first.",
+        )
+
+    entry = repo_cache[cache_key]
+    engine_bundle = entry["engine_bundle"]
+
+    qa_result = run_repo_qa(engine_bundle, req.question)
+
+    return {
+        "repo_name": get_repo_name(req.repo_url),
+        "question": req.question,
+        "answer": qa_result["answer"],
+        "relevant_files": qa_result["relevant_files"]
     }
 
 @router.get("/repo-status")
