@@ -4,6 +4,10 @@ from typing import Optional, List
 class RepoLoadRequest(BaseModel):
     repo_url: str
 
+class RepoQARequest(BaseModel):
+    repo_url: str
+    question: str
+
 class AnalyzeRequest(BaseModel):
     repo_url: str
 
