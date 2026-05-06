@@ -28,7 +28,7 @@ Before installing the project, you must have the following installed on your mac
 3. **Ollama:** Download and install from [ollama.com](https://ollama.com/).
 
 ### Download the Local AI Model
-Once Ollama is installed, open your terminal and pull the Llama 3.2 model that powers the reasoning engine.
+Once Ollama is installed, open your terminal and pull the Qwen 2.5 Coder model that powers the reasoning engine.
 ```bash
  ollama pull qwen2.5-coder:1.5b
 ```
