@@ -43,10 +43,10 @@ Settings.embed_model = HuggingFaceEmbedding(
 )
 
 Settings.llm = Ollama(
-    model="llama3.2:3b",
+    model="qwen2.5-coder:1.5b",
     base_url="http://localhost:11434",
     request_timeout=600.0,
-    context_window=8192,
+    context_window=32768,
 )
 
 def _split_repo_content(content: str) -> List[Tuple[str, str]]:
