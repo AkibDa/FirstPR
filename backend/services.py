@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import torch
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -33,7 +34,14 @@ CHROMA_DIR = Path("./chroma_db")
 CHROMA_DIR.mkdir(exist_ok=True)
 _chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
-Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-base-en-v1.5")
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name="BAAI/bge-base-en-v1.5",
+    device=device,
+    embed_batch_size=64
+)
+
 Settings.llm = Ollama(
     model="llama3.2:3b",
     base_url="http://localhost:11434",
@@ -50,6 +58,9 @@ def _split_repo_content(content: str) -> List[Tuple[str, str]]:
         r"={48}\n(?:File|FILE|file):\s*", content
     )
     files: List[Tuple[str, str]] = []
+
+    IGNORE_EXTS = {".svg", ".lock", ".csv", ".json", ".png", ".jpg", ".min.js", ".map"}
+
     for part in parts:
         if not part.strip() or "Directory structure:" in part:
             continue
@@ -57,6 +68,10 @@ def _split_repo_content(content: str) -> List[Tuple[str, str]]:
         if len(subparts) == 2:
             fp   = subparts[0].strip()
             code = subparts[1].strip()
+
+            if any(fp.endswith(ext) for ext in IGNORE_EXTS):
+              continue
+
             files.append((fp, code))
     return files
 
@@ -104,14 +119,14 @@ def build_query_engine(content: str, repo_name: str) -> dict:
         docs = []
         for fp, src in files:
             meta = _rich_metadata(fp, src)
-            docs.append(Document(text=src, metadata=meta))
+            docs.append(Document(text=src, metadata=meta, excluded_embed_metadata_keys=["functions", "classes", "imports"], excluded_llm_metadata_keys=["functions", "classes", "imports"]))
 
-        splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
+        splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=128)
         index = VectorStoreIndex.from_documents(
             documents=docs,
             storage_context=storage_context,
             transformations=[splitter],
-            show_progress=False,
+            show_progress=True,
         )
 
     bm25_corpus = []
@@ -370,7 +385,7 @@ File ({primary_file}):
 {original[:3000]}
 """
     try:
-        diff_text = str(Settings.llm.complete(prompt)).strip()
+        diff_text = str(Settings.llm.complete(prompt, format="json")).strip()
         # Accept only if it looks like a real diff
         if diff_text.startswith(("---", "@@", "diff")):
             return {"file_path": primary_file, "diff": diff_text}
@@ -399,7 +414,8 @@ def run_reasoning_agent(
     - dependency_chain
     - suggested_patch  (if include_patch=True)
     """
-    code_context = _build_code_context(retrieved_files, sources)
+    top_files = retrieved_files[:4]
+    code_context = _build_code_context(top_files, sources, max_chars_per_file=2000)
 
     dep_chain: List[str] = []
     for fp in retrieved_files[:3]:
@@ -414,75 +430,81 @@ def run_reasoning_agent(
     file_role_str = "\n".join(file_roles) if file_roles else "  (none)"
 
     prompt = f"""
-You are a patient, expert open-source mentor helping a BEGINNER make their very
-first contribution. Use the repository tree, the issue, and the relevant source
-code below to produce a comprehensive, beginner-friendly contribution guide.
+    You are a patient, expert open-source mentor helping a BEGINNER make their very
+    first contribution. Use the repository tree, the issue, and the relevant source
+    code below to produce a comprehensive, beginner-friendly contribution guide.
 
-Repository tree (truncated):
-{tree[:1500]}
+    Repository tree (truncated):
+    {tree[:1500]}
 
-File roles detected:
-{file_role_str}
+    File roles detected:
+    {file_role_str}
 
-Issue:
-{issue_full}
+    Issue:
+    {issue_full}
 
-Relevant source code:
-{code_context}
+    Relevant source code:
+    {code_context}
 
-Dependency / import chain detected:
-{chr(10).join(dep_chain) if dep_chain else "N/A"}
+    Dependency / import chain detected:
+    {chr(10).join(dep_chain) if dep_chain else "N/A"}
 
-Return ONLY valid JSON (no markdown fences, no extra text) with EXACTLY this schema:
-{{
-  "where_to_start": "The exact file path AND function name a beginner should open first (e.g. 'app.py → load_image_pipeline()').",
-  "what_to_read_first": [
-    "file_path_1 — one sentence on what to look for",
-    "file_path_2 — one sentence on what to look for"
-  ],
-  "explanation": "3-5 sentences in plain English describing what the relevant code currently does, why it matters for this issue, and how the pieces fit together.",
-  "logic_trace": [
-    "Step 1: (file.py) What happens here and why.",
-    "Step 2: (file.py) What happens next.",
-    "Step 3: (file.py) How it connects to the issue."
-  ],
-  "contribution_path": [
+    Return ONLY valid JSON. Use the EXACT JSON structure below, but REPLACE all the placeholder strings with your actual analysis:
     {{
-      "step": 1,
-      "title": "Short imperative title (e.g. 'Understand the existing model loading logic')",
-      "description": "Detailed, beginner-friendly instruction. Mention exact function or line references where helpful.",
-      "files_involved": ["path/to/file.py"]
-    }},
-    {{
-      "step": 2,
-      "title": "...",
-      "description": "...",
-      "files_involved": ["..."]
-    }},
-    {{
-      "step": 3,
-      "title": "...",
-      "description": "...",
-      "files_involved": ["..."]
+      "where_to_start": "<Replace with the exact file path AND function name to open first>",
+      "what_to_read_first": [
+        "<Replace with file_path_1 — explanation of what to look for>",
+        "<Replace with file_path_2 — explanation of what to look for>"
+      ],
+      "explanation": "<Replace with 3-5 sentences in plain English describing what the code does and how it fits together.>",
+      "logic_trace": [
+        "Step 1: (file.py) <Replace with what happens here>",
+        "Step 2: (file.py) <Replace with what happens next>"
+      ],
+      "contribution_path": [
+        {{
+          "step": 1,
+          "title": "<Replace with short imperative title>",
+          "description": "<Replace with detailed, beginner-friendly instruction>",
+          "files_involved": ["<Replace with file path>"]
+        }},
+        {{
+          "step": 2,
+          "title": "<Replace with next step title>",
+          "description": "<Replace with next instruction>",
+          "files_involved": ["<Replace with file path>"]
+        }}
+      ],
+      "common_mistakes": [
+        "<Replace with specific pitfall 1>",
+        "<Replace with specific pitfall 2>"
+      ],
+      "dependency_chain": {json.dumps(dep_chain)}
     }}
-  ],
-  "common_mistakes": [
-    "Specific pitfall 1 a beginner is likely to hit on THIS issue.",
-    "Specific pitfall 2.",
-    "Specific pitfall 3."
-  ],
-  "dependency_chain": {json.dumps(dep_chain)}
-}}
-
-Rules:
-- contribution_path MUST have at least 3 steps.
-- what_to_read_first MUST contain file paths, not function names.
-- explanation MUST be 3-5 sentences, not a single line.
-- Every string value must be plain English; no code blocks inside JSON strings.
-"""
+    """
     try:
-        resp   = str(Settings.llm.complete(prompt))
+        resp   = str(Settings.llm.complete(prompt, format="json"))
         result = extract_json(resp)
+
+        if not result:
+          logger.warning("Failed to extract JSON from reasoning agent. Using fallback.")
+          result = {
+            "where_to_start": "Please refer to the top retrieved file.",
+            "what_to_read_first": ["The AI model encountered a formatting error."],
+            "explanation": "The AI model successfully retrieved relevant files but failed to format the step-by-step reasoning into the required JSON structure.",
+            "logic_trace": ["Manual review required."],
+            "contribution_path": [
+              {
+                "step": 1,
+                "title": "Review retrieved files",
+                "description": "Open the files listed in the 'retrieval' section to begin your investigation.",
+                "files_involved": retrieved_files[:2]
+              }
+            ],
+            "common_mistakes": ["N/A"],
+            "dependency_chain": dep_chain
+          }
+
     except Exception as exc:
         logger.error(f"Reasoning agent error: {exc}")
         result = {
