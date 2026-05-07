@@ -2,6 +2,9 @@ import asyncio
 import logging
 import os
 import tempfile
+import traceback
+import subprocess
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -50,20 +53,39 @@ async def load_repo(req: RepoLoadRequest):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_path = os.path.join(tmp_dir, "cloned_repo")
             logger.info(f"Cloning {req.repo_url} …")
-            process = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth=1", req.repo_url, repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # process = await asyncio.create_subprocess_exec(
+            #     "git", "clone", "--depth=1", req.repo_url, repo_path,
+            #     stdout=asyncio.subprocess.PIPE,
+            #     stderr=asyncio.subprocess.PIPE,
+            # )
+            command = ["git", "clone", "--depth=1", req.repo_url, repo_path]
+
+            process = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                capture_output=True,
+                text=True
             )
-            stdout, stderr = await process.communicate()
+
             if process.returncode != 0:
-                raise RuntimeError(f"Git clone failed: {stderr.decode().strip()}")
+                print(f"Error cloning: {process.stderr}")
+            else:
+                print(f"Success: {process.stdout}")
+
+            if process.returncode != 0:
+                raise RuntimeError(f"Git clone failed: {process.stderr.strip()}")
 
             logger.info("Clone successful. Ingesting with gitingest…")
+
             summary, tree, content = await ingest_async(repo_path)
     except Exception as exc:
-        logger.error(f"Ingestion error: {exc}")
-        raise HTTPException(500, f"Failed to ingest repo: {exc}")
+        logger.exception("FULL INGESTION TRACEBACK")
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=repr(exc)
+        )
 
     try:
         engine_bundle = build_query_engine(content, repo_name)
