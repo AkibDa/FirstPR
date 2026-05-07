@@ -88,7 +88,7 @@ Use the POST ```/api/load-repo``` endpoint.
 **Request Body:**
 ```json
 {
-  "repo_url": "[https://github.com/TheAlgorithms/Python](https://github.com/TheAlgorithms/Python)"
+  "repo_url": "https://github.com/TheAlgorithms/Python"
 }
 ```
 *The backend will clone the repo, extract the text, chunk it, and generate vector embeddings locally.*
@@ -97,8 +97,8 @@ Use the POST ```/api/analyze-issue``` endpoint. You can optionally pass ```gener
 **Request Body (Using Direct GitHub URL):**
 ```json
 {
-  "repo_url": "[https://github.com/TheAlgorithms/Python](https://github.com/TheAlgorithms/Python)",
-  "issue_url": "[https://github.com/TheAlgorithms/Python/issues/42](https://github.com/TheAlgorithms/Python/issues/42)"
+  "repo_url": "https://github.com/TheAlgorithms/Python",
+  "issue_url": "https://github.com/TheAlgorithms/Python/issues/42"
 }
 ```
 *Alternatively, you can provide manual ```issue_title``` and ```issue_text``` instead of an ```issue_url```.*
@@ -107,7 +107,7 @@ Use the POST ```/api/ask``` endpoint to explore the repository freely without so
 **Request Body:**
 ```json
 {
-  "repo_url": "[https://github.com/TheAlgorithms/Python](https://github.com/TheAlgorithms/Python)",
+  "repo_url": "https://github.com/TheAlgorithms/Python",
   "question": "How does the binary search algorithm handle edge cases in this codebase?"
 }
 ```
