@@ -235,6 +235,9 @@ async def analyze_issue(
         retrieved_file_paths = [
             f["path"] for f in retrieval.get("relevant_files", []) if "path" in f
         ]
+        # Pass reranker confidence metadata so the reasoning agent can adapt its
+        # grounding preamble and uncertainty language accordingly.
+        reranker_meta = retrieval.get("reranker") or {}
 
         reasoning = await asyncio.to_thread(
             run_reasoning_agent,
@@ -243,6 +246,7 @@ async def analyze_issue(
             sources=sources,
             issue_full=issue_full,
             include_patch=generate_patch,
+            reranker_meta=reranker_meta,
         )
 
         return {

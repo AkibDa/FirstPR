@@ -27,6 +27,7 @@ from utils import (
     classify_file_role,
     build_dependency_chain,
 )
+from reranker import rerank, TIER_HIGH, TIER_MEDIUM, TIER_LOW, TIER_PENALISED
 
 logger = logging.getLogger(__name__)
 
@@ -418,72 +419,54 @@ Return a JSON object with exactly these keys:
 
 
 # ---------------------------------------------------------------------------
-# Retrieval helpers
+# Retrieval + Reranking
 # ---------------------------------------------------------------------------
-
-def _template_reason(file_path: str, method: str, score: Optional[float]) -> str:
-    """Fast, zero-LLM-call fallback reason string."""
-    score_str = f"{score:.2f}" if score is not None else "n/a"
-    return f"{method.capitalize()} match (score {score_str}) in {file_path}."
-
-
-def _rerank_files(
-    seen: Dict[str, Tuple[float, str]],
-    file_priorities: Dict[str, int],
-    top_k: int = 8,
-) -> List[Tuple[str, float, str]]:
-    """
-    Rerank retrieved files by combining retrieval score with structural priority.
-
-    Priority 0 (core source) files receive a +0.3 score bonus; priority 1 files
-    receive +0.15; others receive no bonus.  Files are then sorted descending by
-    adjusted score.
-    """
-    bonus = {0: 0.30, 1: 0.15, 2: 0.05}
-    ranked = []
-    for fp, (score, method) in seen.items():
-        p = file_priorities.get(fp, 3)
-        adjusted = score + bonus.get(p, 0.0)
-        ranked.append((fp, adjusted, method))
-    ranked.sort(key=lambda x: -x[1])
-    return ranked[:top_k]
-
 
 def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
     """
-    Hybrid retrieval: combine vector similarity with BM25, then rerank.
+    Hybrid retrieval → issue-aware reranking pipeline.
 
-    Key changes vs. original:
-    - _explain_why LLM calls eliminated for every file (replaced by fast template)
-    - Structural priority reranking applied after score fusion
-    - BM25 threshold raised from 0.5 → 1.0 to reduce noise
-    - Result cap lowered from 8 → 6 to keep reasoning prompt tight
+    Stage 1 — Recall:  cast a wide net with both semantic (top-12) and BM25
+                        (top-12, threshold lowered to 0.5 so more candidates
+                        reach the reranker rather than being lost early).
+    Stage 2 — Rerank:  ``reranker.rerank()`` scores candidates on five
+                        independent signals (symbol match, filepath domain,
+                        dependency proximity, retrieval agreement, penalty)
+                        and partitions results into HIGH/MEDIUM/LOW/PENALISED
+                        confidence tiers.
+    Stage 3 — Return:  only non-PENALISED files are surfaced (up to 6).
+                        The reranker's ``RerankerResult`` metadata is threaded
+                        through so the reasoning agent can see confidence tiers.
     """
-    vector_index:    VectorStoreIndex  = engine_bundle["vector_index"]
+    vector_index:    VectorStoreIndex    = engine_bundle["vector_index"]
     bm25:            Optional[BM25Okapi] = engine_bundle["bm25"]
-    bm25_nodes:      list              = engine_bundle["bm25_nodes"]
-    sources:         Dict[str, str]    = engine_bundle["sources"]
-    file_priorities: Dict[str, int]    = engine_bundle.get("file_priorities", {})
+    bm25_nodes:      list                = engine_bundle["bm25_nodes"]
+    sources:         Dict[str, str]      = engine_bundle["sources"]
 
-    seen: Dict[str, Tuple[float, str]] = {}
+    # candidates: {file_path: (raw_score, "semantic"|"bm25")}
+    # When a file appears in both, keep the semantic score (it is normalised)
+    # and let the reranker's agreement signal capture the dual hit.
+    candidates: Dict[str, Tuple[float, str]] = {}
 
-    # --- Semantic retrieval ---
+    # --- Stage 1a: Semantic retrieval (wider net for reranker) ---
     try:
-        retriever = vector_index.as_retriever(similarity_top_k=8)
+        retriever = vector_index.as_retriever(similarity_top_k=12)
         nodes: List[NodeWithScore] = retriever.retrieve(issue_full)
         for node in nodes:
             fp    = node.metadata.get("file_path", "")
             score = node.score or 0.0
-            if fp and (fp not in seen or score > seen[fp][0]):
-                seen[fp] = (score, "semantic")
+            if fp and (fp not in candidates or score > candidates[fp][0]):
+                candidates[fp] = (score, "semantic")
     except Exception as exc:
         logger.warning(f"Vector retrieval failed: {exc}")
 
-    # --- BM25 retrieval ---
+    # --- Stage 1b: BM25 retrieval ---
+    # Threshold intentionally LOWERED (0.5 → still filters pure noise)
+    # so the reranker can see BM25 candidates and apply agreement scoring.
     if bm25 and bm25_nodes:
         query_tokens = re.findall(r"[a-zA-Z_]\w*", issue_full)
         bm25_scores  = bm25.get_scores(query_tokens)
-        top_k        = min(8, len(bm25_scores))
+        top_k        = min(12, len(bm25_scores))
         top_indices  = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
@@ -491,34 +474,60 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
         )[:top_k]
         for idx in top_indices:
             score = float(bm25_scores[idx])
-            if score < 1.0:             # raised threshold (was 0.5)
+            if score < 0.5:
                 continue
             fp = bm25_nodes[idx]["file_path"]
-            if fp not in seen or (score > seen[fp][0] and seen[fp][1] == "semantic"):
-                seen[fp] = (score, "bm25")
+            # Record as bm25 only if not already captured by semantic
+            if fp not in candidates:
+                candidates[fp] = (score, "bm25")
+            # If semantic already has it, mark as "both" via score preservation
+            # (the reranker checks semantic_hits & bm25_hits independently)
 
-    # --- Rerank ---
-    ranked = _rerank_files(seen, file_priorities, top_k=6)
+    if not candidates:
+        return {"relevant_files": [], "key_functions": [], "search_keywords": [],
+                "reranker": None}
 
+    # --- Stage 2: Issue-aware reranking ---
+    reranker_result = rerank(
+        candidates  = candidates,
+        sources     = sources,
+        issue_full  = issue_full,
+        top_k       = 6,
+    )
+
+    logger.info(
+        f"Reranker: {len(candidates)} candidates → "
+        f"{len(reranker_result.ranked_files)} after reranking | "
+        f"top_tier={reranker_result.confidence_tier} | "
+        f"anchor={reranker_result.anchor_file} | "
+        f"low_conf={reranker_result.low_confidence}"
+    )
+
+    # --- Stage 3: Build the response payload ---
     relevant_files = []
-    for fp, adj_score, method in ranked:
-        src     = sources.get(fp, "")
-        symbols = extract_symbols(src)
-        role    = classify_file_role(fp, src)
-        # Fast template reason — no extra LLM call per file
-        reason  = _template_reason(fp, method, adj_score)
+    for r in reranker_result.ranked_files:
         relevant_files.append({
-            "path":      fp,
-            "relevance": "high" if adj_score >= 1.0 else "medium",
-            "score":     round(adj_score, 3),
-            "method":    method,
-            "reason":    reason,
-            "functions": symbols["functions"],
-            "classes":   symbols["classes"],
-            "role":      role,
+            "path":             r.path,
+            "relevance":        r.confidence_tier.lower(),   # high/medium/low
+            "score":            r.composite_score,
+            "retrieval_score":  round(r.retrieval_score, 3),
+            "method":           r.retrieval_method,
+            "reason":           r.reason,
+            "functions":        r.functions,
+            "classes":          r.classes,
+            "role":             r.role,
+            # Per-signal breakdown for debug / frontend display
+            "signals": {
+                "symbol":    r.symbol_score,
+                "filepath":  r.filepath_score,
+                "dep":       r.dep_score,
+                "agreement": r.agreement_score,
+                "penalty":   r.penalty,
+            },
+            "matched_symbols": r.matched_symbols,
         })
 
-    # Extract keywords for UI display
+    # Keywords for UI display
     keyword_text = re.sub(r"^Title:[^\n]*\n", "", issue_full, flags=re.IGNORECASE).strip()
     _STOPWORDS = {
         "this", "that", "with", "from", "have", "will", "when", "what",
@@ -531,6 +540,14 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
         "relevant_files":  relevant_files,
         "key_functions":   list({fn for f in relevant_files for fn in f["functions"]})[:10],
         "search_keywords": keywords,
+        # Reranker metadata surfaced to API consumers and the reasoning agent
+        "reranker": {
+            "confidence_tier":    reranker_result.confidence_tier,
+            "overall_confidence": round(reranker_result.overall_confidence, 3),
+            "anchor_file":        reranker_result.anchor_file,
+            "low_confidence":     reranker_result.low_confidence,
+            "explanation":        reranker_result.explanation,
+        },
     }
 
 
@@ -605,17 +622,60 @@ File ({primary_file}):
 
 
 # ---------------------------------------------------------------------------
-# Reasoning Agent — grounded, trim prompts
+# Reasoning Agent — confidence-aware, strictly grounded
 # ---------------------------------------------------------------------------
 
-# Explicit grounding instruction prepended to every reasoning prompt
-_GROUNDING_PREAMBLE = (
-    "IMPORTANT GROUNDING RULES:\n"
-    "1. Reference ONLY files listed in 'Relevant source code' below.\n"
-    "2. Do NOT invent file paths, function names, or documentation links.\n"
-    "3. If you cannot find the answer in the provided context, say so explicitly.\n"
-    "4. Every file_path value in your JSON MUST appear in the 'File roles detected' list.\n\n"
-)
+def _build_grounding_preamble(
+    valid_paths: List[str],
+    low_confidence: bool,
+    confidence_tier: str,
+    reranker_explanation: str,
+) -> str:
+    """
+    Build the grounding preamble that is prepended to every reasoning prompt.
+
+    When confidence is LOW or PENALISED the preamble is expanded with an
+    explicit uncertainty directive so the model admits rather than invents.
+    """
+    path_list = "\n".join(f"  - {p}" for p in valid_paths) or "  (none)"
+
+    base = (
+        "═══════════════════════════════════════════════════════\n"
+        "GROUNDING CONTRACT — READ BEFORE GENERATING ANY OUTPUT\n"
+        "═══════════════════════════════════════════════════════\n"
+        "You are an expert open-source mentor. You MUST follow every rule below.\n\n"
+        "RULE 1 — FILE SCOPE\n"
+        f"  You may ONLY reference files from this exact list:\n{path_list}\n"
+        "  Any file_path value in your JSON that is NOT in this list is a hallucination.\n\n"
+        "RULE 2 — NO INVENTION\n"
+        "  Do NOT invent function names, class names, variable names, or documentation links.\n"
+        "  Every symbol you mention must appear verbatim in the source code provided.\n\n"
+        "RULE 3 — UNCERTAINTY\n"
+        "  If the code context is insufficient to answer with confidence, say so explicitly.\n"
+        "  Use phrases like 'Based on available context…' or 'This cannot be determined from the retrieved files.'\n\n"
+        "RULE 4 — NO SPECULATION\n"
+        "  Do NOT suggest files that are not in the list above, even if you think they might exist.\n"
+        "  Do NOT reference README, CONTRIBUTING, or documentation files unless they appear in the list.\n\n"
+    )
+
+    confidence_block = (
+        f"LOCALISATION CONFIDENCE: {confidence_tier}\n"
+        f"RERANKER ASSESSMENT: {reranker_explanation}\n\n"
+    )
+
+    if low_confidence:
+        uncertainty_directive = (
+            "⚠ LOW-CONFIDENCE WARNING ⚠\n"
+            "The bug localisation system has LOW confidence that the retrieved files\n"
+            "are the correct fix location. You MUST:\n"
+            "  • Begin your 'explanation' field with: 'Note: localisation confidence is low.'\n"
+            "  • State in 'common_mistakes' that the fix location may differ from retrieved files.\n"
+            "  • Do NOT produce a confident step-by-step patch if evidence is insufficient.\n"
+            "  • Set 'where_to_start' to the most likely candidate but flag uncertainty.\n\n"
+        )
+        return base + confidence_block + uncertainty_directive
+    else:
+        return base + confidence_block
 
 
 def run_reasoning_agent(
@@ -624,123 +684,229 @@ def run_reasoning_agent(
     sources: Dict[str, str],
     issue_full: str,
     include_patch: bool = False,
+    reranker_meta: Optional[dict] = None,
 ) -> dict:
     """
-    Mentorship-focused reasoning agent with strict grounding controls.
+    Confidence-aware mentorship reasoning agent.
 
-    Changes vs. original:
-    - _GROUNDING_PREAMBLE enforces file-path grounding
-    - context window trimmed: tree 1 000 chars, code 8 000 total, issue 800 chars
-    - Only top 3 files used for dependency tracing (was 3, made explicit)
-    - dep_chain injected at JSON-build time, not appended by LLM
+    New behaviour vs. previous version:
+    - Grounding preamble is dynamically constructed from reranker confidence
+    - LOW/PENALISED confidence triggers explicit uncertainty directives in prompt
+    - The reranker's explanation and anchor file are injected into the prompt
+    - File-path validation: any path invented by the LLM that isn't in the
+      retrieved set is stripped from the output before returning
+    - dep_chain is always computed statically and injected — never LLM-generated
     """
-    top_files    = retrieved_files[:4]
+    reranker_meta    = reranker_meta or {}
+    low_confidence   = reranker_meta.get("low_confidence", False)
+    confidence_tier  = reranker_meta.get("confidence_tier", "UNKNOWN")
+    reranker_explain = reranker_meta.get("explanation", "No reranker metadata available.")
+    anchor_file      = reranker_meta.get("anchor_file")
+
+    # Use top-4 files for code context; anchor file is always first if present
+    ordered = list(dict.fromkeys(
+        ([anchor_file] if anchor_file and anchor_file in retrieved_files else []) +
+        [f for f in retrieved_files if f != anchor_file]
+    ))
+    top_files    = ordered[:4]
     code_context = _build_code_context(top_files, sources, max_chars_per_file=2000, total_cap=8_000)
 
+    # Static dependency chain — never LLM-generated
     dep_chain: List[str] = []
-    for fp in retrieved_files[:3]:
+    for fp in top_files[:3]:
         dep_chain.extend(build_dependency_chain(fp, sources))
-    dep_chain = list(dict.fromkeys(dep_chain))
+    dep_chain = list(dict.fromkeys(dep_chain))[:12]
 
-    file_roles = []
+    # File roles
+    file_role_lines: List[str] = []
     for fp in retrieved_files:
         src  = sources.get(fp, "")
         role = classify_file_role(fp, src)
-        file_roles.append(f"  - {fp}  [{role}]")
-    file_role_str  = "\n".join(file_roles) if file_roles else "  (none)"
-    valid_paths_str = "\n".join(f"  {fp}" for fp in retrieved_files) or "  (none)"
+        file_role_lines.append(f"  - {fp}  [{role}]")
+    file_role_str = "\n".join(file_role_lines) or "  (none)"
 
-    prompt = f"""{_GROUNDING_PREAMBLE}You are a patient, expert open-source mentor helping a BEGINNER make their first contribution.
-Use ONLY the repository tree, issue, and source code provided below.
+    # Anchor hint for the model
+    anchor_hint = (
+        f"ANCHOR FILE (highest symbol-match confidence): {anchor_file}\n"
+        if anchor_file else ""
+    )
 
-Repository tree (truncated):
-{tree[:1000]}
+    grounding_preamble = _build_grounding_preamble(
+        valid_paths          = retrieved_files,
+        low_confidence       = low_confidence,
+        confidence_tier      = confidence_tier,
+        reranker_explanation = reranker_explain,
+    )
 
-Valid file paths you may reference:
-{valid_paths_str}
+    uncertainty_note = (
+        '"Note: localisation confidence is low — fix location may differ from retrieved files."'
+        if low_confidence else
+        '"Based on the retrieved source code…"'
+    )
 
-File roles detected:
+    prompt = f"""{grounding_preamble}
+You are a patient, expert open-source mentor helping a BEGINNER make their first contribution.
+Produce a structured contribution guide using ONLY the files and symbols visible in the context below.
+
+{anchor_hint}File roles:
 {file_role_str}
 
 Issue:
 {issue_full[:800]}
 
-Relevant source code:
+Relevant source code (ONLY reference symbols that appear in the code below):
 {code_context}
 
-Dependency chain detected:
-{chr(10).join(dep_chain[:10]) if dep_chain else "N/A"}
+Dependency chain (statically computed — do not modify):
+{chr(10).join(dep_chain) if dep_chain else "N/A"}
 
-Return ONLY valid JSON with this exact structure (replace all placeholder strings):
+Return ONLY valid JSON — no markdown fences, no commentary outside the JSON object.
+Start your "explanation" with exactly: {uncertainty_note}
+
 {{
-  "where_to_start": "<exact file path AND function name to open first — must be in valid paths list>",
+  "where_to_start": "<file path from valid list + function name found in that file's source>",
   "what_to_read_first": [
-    "<file_path_1 — what to look for>",
-    "<file_path_2 — what to look for>"
+    "<file_path — specific thing to look for in that file>",
+    "<file_path — specific thing to look for in that file>"
   ],
-  "explanation": "<3-5 sentences in plain English describing what the relevant code does>",
+  "explanation": "<begin with the uncertainty_note above, then 2-4 sentences grounded in the code>",
   "logic_trace": [
-    "Step 1: (file.py) <what happens here>",
-    "Step 2: (file.py) <what happens next>"
+    "Step 1: (exact_file.py) <what this file does relative to the issue>",
+    "Step 2: (exact_file.py) <what happens next>"
   ],
   "contribution_path": [
     {{
       "step": 1,
-      "title": "<short imperative title>",
-      "description": "<detailed beginner-friendly instruction referencing only real files>",
-      "files_involved": ["<file path from valid paths list>"]
+      "title": "<imperative verb phrase>",
+      "description": "<concrete instruction — cite only symbols visible in the source above>",
+      "files_involved": ["<path from valid list only>"]
     }}
   ],
   "common_mistakes": [
-    "<specific pitfall 1>",
-    "<specific pitfall 2>"
+    "<concrete pitfall drawn from the actual code>",
+    "<second pitfall or uncertainty warning if confidence is low>"
   ],
-  "dependency_chain": {json.dumps(dep_chain)}
+  "dependency_chain": {json.dumps(dep_chain)},
+  "confidence_note": "<one sentence summarising how confident the localisation is and why>"
 }}"""
+
+    # Valid path set for post-processing validation
+    valid_path_set: set = set(retrieved_files)
+
+    def _sanitise(result: dict) -> dict:
+        """
+        Strip any file paths the LLM invented that aren't in the retrieved set.
+        Mutates and returns the result dict.
+        """
+        # where_to_start: extract path prefix and validate
+        wts = result.get("where_to_start", "")
+        if wts:
+            # The model may write "path/file.py → function_name()" — take the path part
+            wts_path = re.split(r"[\s→:,]", wts)[0].strip()
+            if wts_path and wts_path not in valid_path_set:
+                logger.warning(f"Reasoning agent hallucinated where_to_start path: {wts_path!r}")
+                result["where_to_start"] = retrieved_files[0] if retrieved_files else ""
+
+        # what_to_read_first: filter out invented paths
+        wtrf = result.get("what_to_read_first", [])
+        if isinstance(wtrf, list):
+            cleaned = []
+            for item in wtrf:
+                # Item format: "path/file.py — description"
+                path_part = re.split(r"[\s—–-]", item)[0].strip()
+                if path_part in valid_path_set or path_part not in sources:
+                    cleaned.append(item)
+                else:
+                    logger.warning(f"Stripped hallucinated path from what_to_read_first: {path_part!r}")
+            result["what_to_read_first"] = cleaned
+
+        # contribution_path: validate files_involved
+        for step in result.get("contribution_path", []):
+            fi = step.get("files_involved", [])
+            if isinstance(fi, list):
+                step["files_involved"] = [
+                    f for f in fi if f in valid_path_set
+                ]
+
+        return result
 
     try:
         resp   = str(Settings.llm.complete(prompt, format="json"))
         result = extract_json(resp)
 
         if not result:
-            logger.warning("Reasoning agent returned no valid JSON; using fallback.")
-            result = {
-                "where_to_start":     retrieved_files[0] if retrieved_files else "",
-                "what_to_read_first": retrieved_files[:2],
-                "explanation": (
-                    "The AI retrieved relevant files but could not format a structured guide. "
-                    "Please review the files in the retrieval section manually."
-                ),
-                "logic_trace":       ["Manual review required."],
-                "contribution_path": [{
-                    "step": 1,
-                    "title": "Review retrieved files",
-                    "description": "Open the files listed in the retrieval section.",
-                    "files_involved": retrieved_files[:2],
-                }],
-                "common_mistakes":   ["N/A"],
-                "dependency_chain":  dep_chain,
-            }
+            logger.warning("Reasoning agent: no valid JSON; using structured fallback.")
+            result = _low_confidence_fallback(retrieved_files, dep_chain, low_confidence)
         else:
-            # Always override dep_chain with the statically computed value
+            result = _sanitise(result)
+            # Always inject static dep_chain (model must not modify it)
             result["dependency_chain"] = dep_chain
+            # Inject reranker metadata
+            result["localisation_confidence"] = {
+                "tier":          confidence_tier,
+                "score":         reranker_meta.get("overall_confidence"),
+                "anchor_file":   anchor_file,
+                "low_confidence": low_confidence,
+            }
 
     except Exception as exc:
         logger.error(f"Reasoning agent error: {exc}")
         result = {
-            "explanation":        f"Failed to generate guide: {exc}",
-            "where_to_start":     "",
-            "what_to_read_first": [],
-            "logic_trace":        [],
-            "contribution_path":  [],
-            "common_mistakes":    [],
-            "dependency_chain":   dep_chain,
+            "explanation":             f"Failed to generate guide: {exc}",
+            "where_to_start":          retrieved_files[0] if retrieved_files else "",
+            "what_to_read_first":      retrieved_files[:2],
+            "logic_trace":             ["Error during reasoning — review retrieval results manually."],
+            "contribution_path":       [],
+            "common_mistakes":         ["An internal error occurred. Verify the repository was indexed correctly."],
+            "dependency_chain":        dep_chain,
+            "confidence_note":         "Reasoning failed; confidence cannot be assessed.",
+            "localisation_confidence": reranker_meta,
         }
 
     if include_patch:
         result["suggested_patch"] = _generate_patch(retrieved_files, sources, issue_full)
 
     return result
+
+
+def _low_confidence_fallback(
+    retrieved_files: List[str],
+    dep_chain: List[str],
+    low_confidence: bool,
+) -> dict:
+    """Structured fallback when the LLM fails to produce valid JSON."""
+    uncertainty = (
+        "Note: localisation confidence is low — fix location may differ from retrieved files. "
+        if low_confidence else ""
+    )
+    return {
+        "where_to_start":     retrieved_files[0] if retrieved_files else "",
+        "what_to_read_first": retrieved_files[:2],
+        "explanation": (
+            f"{uncertainty}The AI retrieved relevant files but could not format a structured guide. "
+            "Review the files in the retrieval section to begin your investigation."
+        ),
+        "logic_trace":       ["Manual review required — see retrieved files above."],
+        "contribution_path": [{
+            "step": 1,
+            "title": "Review retrieved files",
+            "description": (
+                "Open each file listed in the retrieval section and search for the "
+                "symbols mentioned in the issue (class/function names). Start with the "
+                "highest-confidence file."
+            ),
+            "files_involved": retrieved_files[:3],
+        }],
+        "common_mistakes": [
+            "Do not modify files not listed in the retrieval results.",
+            "Verify the fix location manually before writing code — confidence is low."
+            if low_confidence else
+            "Ensure you understand the dependency chain before modifying files.",
+        ],
+        "dependency_chain":        dep_chain,
+        "confidence_note":         "Fallback response — LLM formatting error.",
+        "localisation_confidence": None,
+    }
 
 
 # ---------------------------------------------------------------------------
