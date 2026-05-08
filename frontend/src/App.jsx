@@ -141,7 +141,7 @@ const globalStyles = `
   .scanline-fast {
     position: absolute;
     inset: 0;
-    background: linear-gradient(transparent 50%, rgba(0,255,65,0.02) 50%);
+    background: linear-gradient(transparent 50%, rgba(0,255,65,0.01) 50%);
     background-size: 100% 4px;
     pointer-events: none;
     border-radius: inherit;

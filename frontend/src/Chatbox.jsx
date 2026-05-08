@@ -325,18 +325,35 @@ function QAAnswerCard({ data }) {
           ANSWER
         </div>
         <p style={{
-          color: "#00dd33", fontSize: 13, lineHeight: 1.8,
+          color: "#00dd33", 
+          fontSize: 13, lineHeight: 1.8,
           fontFamily: "'JetBrains Mono', monospace", whiteSpace: "pre-wrap",
         }}>
           {data.answer}
         </p>
       </div>
 
-      {/* Relevant files */}
+      {/* Relevant files - Handled as simple strings instead of objects */}
       {data.relevant_files?.length > 0 && (
         <div style={{ padding: "0 18px 14px" }}>
           <Accordion title={`REFERENCED FILES (${data.relevant_files.length})`} icon={FileCode}>
-            {data.relevant_files.map((f, i) => <FileCard key={i} file={f} />)}
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {data.relevant_files.map((filePath, i) => (
+                <li key={i} style={{ 
+                  color: "#009922", 
+                  fontSize: 11, 
+                  padding: "6px 0",
+                  borderBottom: i !== data.relevant_files.length - 1 ? "1px solid rgba(0,255,65,0.05)" : "none",
+                  fontFamily: "'JetBrains Mono', monospace",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8
+                }}>
+                  <span style={{ color: "#005015" }}>&gt;</span>
+                  {filePath}
+                </li>
+              ))}
+            </ul>
           </Accordion>
         </div>
       )}
