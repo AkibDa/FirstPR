@@ -55,7 +55,7 @@ const globalStyles = `
     content: '';
     position: fixed;
     inset: 0;
-    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.8) 100%);
+    background: radial-gradient(ellipse at center, transparent 75%, rgba(0,0,0,0.4) 100%);
     pointer-events: none;
     z-index: 9998;
   }

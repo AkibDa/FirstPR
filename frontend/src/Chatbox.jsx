@@ -6,7 +6,6 @@ import {
   Zap, BookOpen, GitCommit, Wrench, MessageSquare
 } from "lucide-react";
 
-// ─── STRUCTURED RENDERERS ────────────────────────────────────────────────────
 
 function Badge({ label, color = "green" }) {
   const colors = {
@@ -326,7 +325,7 @@ function QAAnswerCard({ data }) {
           ANSWER
         </div>
         <p style={{
-          color: "#008a1e", fontSize: 13, lineHeight: 1.8,
+          color: "#00dd33", fontSize: 13, lineHeight: 1.8,
           fontFamily: "'JetBrains Mono', monospace", whiteSpace: "pre-wrap",
         }}>
           {data.answer}
@@ -492,11 +491,15 @@ export default function ChatBox({ repoUrl, repoName, onReset }) {
                     borderRadius: "0 5px 5px 5px",
                     padding: "13px 17px",
                     boxShadow: "inset 0 0 30px rgba(0,0,0,0.4)",
+                    position:"relative",
+                    overflow:"hidden"
                   }}>
+                    <div className="scanline-fast" />
                     <p style={{
                       whiteSpace: "pre-wrap", lineHeight: 1.8,
-                      fontSize: 13, color: "#008a1e",
+                      fontSize: 13, color: "#00dd33",
                       fontFamily: "'JetBrains Mono', monospace",
+                      position:"relative", zIndex:1
                     }}>
                       {msg.content}
                     </p>
@@ -520,7 +523,7 @@ export default function ChatBox({ repoUrl, repoName, onReset }) {
                 }}>
                   <p style={{
                     whiteSpace: "pre-wrap", lineHeight: 1.7,
-                    fontSize: 13, color: "#009922",
+                    fontSize: 13, color: "#31a400",
                     fontFamily: "'JetBrains Mono', monospace",
                   }}>
                     {msg.content}
@@ -549,7 +552,7 @@ export default function ChatBox({ repoUrl, repoName, onReset }) {
                   }}
                 />
               ))}
-              <span style={{ fontSize: 11, color: "#005015", marginLeft: 8, letterSpacing: 1 }}>
+              <span style={{ fontSize: 11, color: "#026e1f", marginLeft: 8, letterSpacing: 1 }}>
                 processing...
               </span>
             </div>
