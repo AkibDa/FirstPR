@@ -25,15 +25,7 @@ from services import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
-# ---------------------------------------------------------------------------
-# In-progress tracker so concurrent requests don't double-index the same repo
-# ---------------------------------------------------------------------------
 _indexing_in_progress: dict[str, asyncio.Event] = {}
-
-
-# ---------------------------------------------------------------------------
-# Streaming status helper
-# ---------------------------------------------------------------------------
 
 async def _stream_status(steps: list[tuple[str, any]]) -> AsyncGenerator[str, None]:
     """
@@ -50,11 +42,6 @@ async def _stream_status(steps: list[tuple[str, any]]) -> AsyncGenerator[str, No
         else:
             result = coro
     yield json.dumps({"status": "done", "result": result}) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# POST /api/load-repo
-# ---------------------------------------------------------------------------
 
 @router.post("/load-repo")
 async def load_repo(req: RepoLoadRequest):
@@ -76,7 +63,6 @@ async def load_repo(req: RepoLoadRequest):
     cache_key = req.repo_url.rstrip("/")
     repo_name = get_repo_name(req.repo_url)
 
-    # --- Already cached ---
     if cache_key in repo_cache:
         entry = repo_cache[cache_key]
         return {
@@ -86,7 +72,6 @@ async def load_repo(req: RepoLoadRequest):
             "tree":      entry["tree"],
         }
 
-    # --- Dedup: another request is already indexing this repo ---
     if cache_key in _indexing_in_progress:
         logger.info(f"Waiting for in-progress indexing of {cache_key} …")
         await _indexing_in_progress[cache_key].wait()
@@ -100,7 +85,6 @@ async def load_repo(req: RepoLoadRequest):
             }
         raise HTTPException(500, "Indexing finished but repo not found in cache.")
 
-    # --- Start indexing ---
     done_event = asyncio.Event()
     _indexing_in_progress[cache_key] = done_event
 
@@ -146,7 +130,6 @@ async def load_repo(req: RepoLoadRequest):
         media_type="application/x-ndjson",
     )
 
-
 async def _progressive_load(
     cache_key: str,
     repo_name: str,
@@ -160,11 +143,6 @@ async def _progressive_load(
         yield json.dumps({"status": "done", **result}) + "\n"
     except Exception as exc:
         yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# POST /api/analyze-issue
-# ---------------------------------------------------------------------------
 
 @router.post("/analyze-issue")
 async def analyze_issue(
@@ -235,8 +213,6 @@ async def analyze_issue(
         retrieved_file_paths = [
             f["path"] for f in retrieval.get("relevant_files", []) if "path" in f
         ]
-        # Pass reranker confidence metadata so the reasoning agent can adapt its
-        # grounding preamble and uncertainty language accordingly.
         reranker_meta = retrieval.get("reranker") or {}
 
         reasoning = await asyncio.to_thread(
@@ -268,7 +244,6 @@ async def analyze_issue(
 
     return await _run_pipeline()
 
-
 async def _streamed_pipeline(issue_full: str, pipeline_coro_factory) -> AsyncGenerator[str, None]:
     """Emit progressive status events, then the final result."""
     yield json.dumps({"status": "analyzing"}) + "\n"
@@ -282,11 +257,6 @@ async def _streamed_pipeline(issue_full: str, pipeline_coro_factory) -> AsyncGen
         yield json.dumps({"status": "done", "result": result}) + "\n"
     except Exception as exc:
         yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# POST /api/ask
-# ---------------------------------------------------------------------------
 
 @router.post("/ask")
 async def ask_repo(req: RepoQARequest):
@@ -313,11 +283,6 @@ async def ask_repo(req: RepoQARequest):
         "relevant_files": qa_result["relevant_files"],
     }
 
-
-# ---------------------------------------------------------------------------
-# GET /api/repo-status
-# ---------------------------------------------------------------------------
-
 @router.get("/repo-status")
 async def repo_status():
     """Return metadata about every repository currently held in memory."""
@@ -332,11 +297,6 @@ async def repo_status():
             "has_bm25":   bundle.get("bm25") is not None,
         })
     return {"cached_repos": repos}
-
-
-# ---------------------------------------------------------------------------
-# GET /api/health
-# ---------------------------------------------------------------------------
 
 @router.get("/health")
 async def health():

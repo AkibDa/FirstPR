@@ -5,16 +5,13 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-
 def validate_github_url(url: str) -> bool:
     """Return True if *url* looks like a GitHub repository URL."""
     return url.startswith(("https://github.com/", "http://github.com/"))
 
-
 def get_repo_name(url: str) -> str:
     """Extract the bare repository name from a GitHub URL."""
     return url.rstrip("/").split("/")[-1].replace(".git", "")
-
 
 def parse_github_issue_url(url: str) -> Optional[Tuple[str, str, str]]:
     """
@@ -30,7 +27,6 @@ def parse_github_issue_url(url: str) -> Optional[Tuple[str, str, str]]:
     if m:
         return m.group(1), m.group(2), m.group(3)
     return None
-
 
 async def fetch_github_issue(issue_url: str) -> Dict[str, str]:
     """
@@ -60,11 +56,6 @@ async def fetch_github_issue(issue_url: str) -> Dict[str, str]:
         "number": number,
     }
 
-
-# ---------------------------------------------------------------------------
-# Source analysis helpers
-# ---------------------------------------------------------------------------
-
 _IMPORT_RE = re.compile(
     r"""
     (?:^|\n)
@@ -75,7 +66,6 @@ _IMPORT_RE = re.compile(
     """,
     re.VERBOSE,
 )
-
 
 def extract_imports(source: str) -> List[str]:
     """Return a deduplicated list of top-level module names imported in *source*."""
@@ -88,10 +78,8 @@ def extract_imports(source: str) -> List[str]:
                 modules.append(part.strip().split(".")[0])
     return list(dict.fromkeys(mod for mod in modules if mod))
 
-
 _FUNC_RE  = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE)
 _CLASS_RE = re.compile(r"^\s*class\s+(\w+)\s*[:(]",          re.MULTILINE)
-
 
 def extract_symbols(source: str) -> Dict[str, List[str]]:
     """Return ``{"functions": [...], "classes": [...]}`` found in *source*."""
@@ -99,7 +87,6 @@ def extract_symbols(source: str) -> Dict[str, List[str]]:
         "functions": _FUNC_RE.findall(source),
         "classes":   _CLASS_RE.findall(source),
     }
-
 
 def classify_file_role(file_path: str, source: str) -> str:
     """Heuristically classify a file's architectural role."""
@@ -123,7 +110,6 @@ def classify_file_role(file_path: str, source: str) -> str:
     if "@router" in source or "@app" in source:
         return "route"
     return "module"
-
 
 def build_dependency_chain(
     file_path: str,

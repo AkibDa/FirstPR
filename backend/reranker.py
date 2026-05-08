@@ -1,29 +1,3 @@
-"""
-reranker.py — Issue-Aware Bug Localization & Relevance Ranking Layer
-=====================================================================
-
-This module sits between raw hybrid retrieval (semantic + BM25) and the
-reasoning agent.  Its job is to answer one precise question:
-
-    "Given a GitHub issue, which retrieved files are *actually* connected
-     to the problem, and with how much confidence?"
-
-It does this with five independent signals, each producing a score in [0, 1]:
-
-    1. Symbol Match   — do class/function names from the issue appear in this file?
-    2. Filepath Match — does the file path contain domain keywords from the issue?
-    3. Dependency Proximity — how close is this file to a symbol-matched anchor?
-    4. Semantic Agreement — do both semantic AND BM25 retrieval agree on this file?
-    5. Penalty         — deduct for infrastructure/logging/env/doc files that
-                         aren't directly named in the issue.
-
-A weighted composite score is computed, then files are partitioned into
-confidence tiers (HIGH / MEDIUM / LOW / PENALISED) with explicit reasoning
-strings that the reasoning agent can show to the user.
-
-All computation is zero-LLM-cost: pure Python regex + set operations.
-"""
-
 from __future__ import annotations
 
 import re
@@ -32,12 +6,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from utils import extract_symbols, classify_file_role, build_dependency_chain
+from issue_parser import extract_issue_entities
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Tuneable weights  (must sum to 1.0)
-# ---------------------------------------------------------------------------
 _W_SYMBOL     = 0.35   # strongest signal: name mentioned in issue ↔ file
 _W_FILEPATH   = 0.25   # second: path semantics match issue domain
 _W_DEP        = 0.15   # third: dependency proximity to anchor file
@@ -46,9 +18,6 @@ _W_RETRIEVAL  = 0.10   # base retrieval score (normalised), tie-breaker
 
 assert abs(_W_SYMBOL + _W_FILEPATH + _W_DEP + _W_AGREEMENT + _W_RETRIEVAL - 1.0) < 1e-9
 
-# ---------------------------------------------------------------------------
-# Confidence tiers
-# ---------------------------------------------------------------------------
 TIER_HIGH       = "HIGH"       # composite ≥ 0.55
 TIER_MEDIUM     = "MEDIUM"     # composite ≥ 0.35
 TIER_LOW        = "LOW"        # composite ≥ 0.15
@@ -59,10 +28,6 @@ _TIER_THRESHOLDS = [
     (0.35, TIER_MEDIUM),
     (0.15, TIER_LOW),
 ]
-
-# ---------------------------------------------------------------------------
-# Penalty targets — infrastructure files that should not rank unless named
-# ---------------------------------------------------------------------------
 
 # Path fragments that suggest low-signal infrastructure
 _PENALTY_PATH_FRAGMENTS: Tuple[str, ...] = (
@@ -88,10 +53,6 @@ _PENALTY_AMOUNT = 0.25
 # If the issue text directly names the file stem, the penalty is waived
 _PENALTY_WAIVE_IF_NAMED = True
 
-# ---------------------------------------------------------------------------
-# Filepath keyword sets — grouped by domain so we can match issue domain → path
-# ---------------------------------------------------------------------------
-
 _FILEPATH_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
     "tool":        ["tool", "tools", "plugin", "extension", "adapter"],
     "runtime":     ["runtime", "runner", "executor", "engine", "worker", "process"],
@@ -116,10 +77,6 @@ for _domain, _kws in _FILEPATH_DOMAIN_KEYWORDS.items():
     for _kw in _kws:
         _KW_TO_DOMAIN[_kw] = _domain
 
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
 
 @dataclass
 class FileRankResult:
@@ -161,24 +118,32 @@ class RerankerResult:
     low_confidence:    bool         # True if even the best file is LOW/PENALISED
     explanation:       str          # human-readable summary for the reasoning agent
 
-
-# ---------------------------------------------------------------------------
-# Signal computers
-# ---------------------------------------------------------------------------
-
 def _extract_issue_symbols(issue_full: str) -> Set[str]:
     """
-    Extract CamelCase identifiers and snake_case names from the issue text.
+    Extract high-precision code symbols from the issue text.
 
-    Examples: "ToolRuntime", "with_config", "AgentExecutor"
-    Minimum length 4 to filter noise.
+    Replaces the naive regex-only approach with an engineering-aware parser:
+    - Prioritises backticked identifiers and stack trace frames
+    - Filters generic prose tokens ("This", "Expected", "Example", "None", ...)
+    - Uses confidence thresholds to avoid polluting symbol matches
     """
-    # CamelCase / PascalCase
-    camel = re.findall(r"\b[A-Z][a-zA-Z0-9]{3,}\b", issue_full)
-    # snake_case (at least one underscore, each segment ≥ 2 chars)
-    snake = re.findall(r"\b[a-z][a-z0-9]{1,}(?:_[a-z0-9]{2,})+\b", issue_full)
-    # All-caps acronyms like "LLM", "API" are already in camel via the pattern
-    return set(camel + snake)
+    entities = extract_issue_entities(issue_full)
+
+    # High-confidence symbols only. This directly controls reranker precision.
+    symbols = {
+        e.text
+        for e in entities
+        if e.kind == "symbol" and e.confidence >= 0.60
+    }
+
+    # Error types can be useful anchors even if not present as defs/classes.
+    symbols |= {
+        e.text
+        for e in entities
+        if e.kind == "error_type" and e.confidence >= 0.75
+    }
+
+    return symbols
 
 
 def _extract_issue_domain_keywords(issue_full: str) -> Set[str]:
@@ -187,7 +152,24 @@ def _extract_issue_domain_keywords(issue_full: str) -> Set[str]:
     Used to match issue → filepath segments.
     """
     text_lower = issue_full.lower()
-    return {kw for kw in _KW_TO_DOMAIN if kw in text_lower}
+
+    # Keep the simple keyword scan but bias toward issues that explicitly mention
+    # tool/runtime/config/middleware style keywords.
+    kws = {kw for kw in _KW_TO_DOMAIN if kw in text_lower}
+
+    # If a filepath is present, add path-derived tokens as weak domain hints.
+    # Example: `src/middleware/auth.py` should reinforce middleware/auth.
+    entities = extract_issue_entities(issue_full)
+    for e in entities:
+        if e.kind != "filepath" or e.confidence < 0.70:
+            continue
+        fp = e.text.lower().replace("\\", "/")
+        parts = re.split(r"[/._\-]", fp)
+        for p in parts:
+            if p in _KW_TO_DOMAIN:
+                kws.add(p)
+
+    return kws
 
 
 def _symbol_score(
@@ -397,11 +379,6 @@ def _build_reason(result: FileRankResult) -> str:
     }.get(result.confidence_tier, "")
 
     return f"[{tier_tag}] " + " | ".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 
 def rerank(
     candidates: Dict[str, Tuple[float, str]],   # path → (raw_score, method)
