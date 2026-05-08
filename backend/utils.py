@@ -36,9 +36,9 @@ async def fetch_github_issue(issue_url: str) -> Dict[str, str]:
     """
     Fetch a GitHub issue's title and body via the public REST API.
 
-    Returns a dict with keys ``title`` and ``body``.
-    Raises ``ValueError`` on bad URL; raises ``httpx.HTTPError`` on
-    network / API failures.
+    Returns a dict with keys ``title``, ``body``, ``labels``, and ``number``.
+    Raises ``ValueError`` on bad URL; raises ``httpx.HTTPError`` on network /
+    API failures.
     """
     parsed = parse_github_issue_url(issue_url)
     if not parsed:
@@ -46,7 +46,6 @@ async def fetch_github_issue(issue_url: str) -> Dict[str, str]:
 
     owner, repo, number = parsed
     api_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{number}"
-
     headers = {"Accept": "application/vnd.github+json"}
 
     async with httpx.AsyncClient(timeout=20) as client:
@@ -55,25 +54,31 @@ async def fetch_github_issue(issue_url: str) -> Dict[str, str]:
         data = resp.json()
 
     return {
-        "title": data.get("title", ""),
-        "body": data.get("body", "") or "",
+        "title":  data.get("title", ""),
+        "body":   data.get("body", "") or "",
         "labels": [lbl["name"] for lbl in data.get("labels", [])],
         "number": number,
     }
 
+
+# ---------------------------------------------------------------------------
+# Source analysis helpers
+# ---------------------------------------------------------------------------
+
 _IMPORT_RE = re.compile(
     r"""
-    (?:^|\n)                           # start of line
+    (?:^|\n)
     (?:
-        from\s+([\w.]+)\s+import[^\n]* # from X import …
-      | import\s+([\w.][^\n,]*)        # import X  (one module per match)
+        from\s+([\w.]+)\s+import[^\n]*
+      | import\s+([\w.][^\n,]*)
     )
     """,
     re.VERBOSE,
 )
 
+
 def extract_imports(source: str) -> List[str]:
-    """Return a deduplicated list of module names imported in *source*."""
+    """Return a deduplicated list of top-level module names imported in *source*."""
     modules: List[str] = []
     for m in _IMPORT_RE.finditer(source):
         if m.group(1):
@@ -81,10 +86,12 @@ def extract_imports(source: str) -> List[str]:
         elif m.group(2):
             for part in m.group(2).split(","):
                 modules.append(part.strip().split(".")[0])
-    return list(dict.fromkeys(m for m in modules if m))
+    return list(dict.fromkeys(mod for mod in modules if mod))
+
 
 _FUNC_RE  = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE)
 _CLASS_RE = re.compile(r"^\s*class\s+(\w+)\s*[:(]",          re.MULTILINE)
+
 
 def extract_symbols(source: str) -> Dict[str, List[str]]:
     """Return ``{"functions": [...], "classes": [...]}`` found in *source*."""
@@ -92,6 +99,7 @@ def extract_symbols(source: str) -> Dict[str, List[str]]:
         "functions": _FUNC_RE.findall(source),
         "classes":   _CLASS_RE.findall(source),
     }
+
 
 def classify_file_role(file_path: str, source: str) -> str:
     """Heuristically classify a file's architectural role."""
@@ -116,6 +124,7 @@ def classify_file_role(file_path: str, source: str) -> str:
         return "route"
     return "module"
 
+
 def build_dependency_chain(
     file_path: str,
     all_sources: Dict[str, str],
@@ -124,12 +133,9 @@ def build_dependency_chain(
     """
     Trace the import chain starting from *file_path* up to *max_depth* hops.
 
-    *all_sources* maps file-path → source text (keys as returned by gitingest,
-    e.g. "app.py", "utils/helpers.py").
-
+    *all_sources* maps file-path → source text.
     Returns an ordered list of edge strings like ["app.py → model.py"].
-    Only local imports (files that exist as keys in *all_sources*) are followed;
-    third-party packages are ignored.
+    Only local imports (files that exist as keys in *all_sources*) are followed.
     """
     module_to_path: Dict[str, str] = {}
     for fp in all_sources:
@@ -138,8 +144,8 @@ def build_dependency_chain(
         stem = without_ext.split("/")[-1].split("\\")[-1]
         module_to_path.setdefault(stem, fp)
 
-    chain: List[str] = []
-    visited: set     = set()
+    chain:   List[str] = []
+    visited: set       = set()
 
     def _trace(fp: str, depth: int) -> None:
         if depth > max_depth or fp in visited:

@@ -4,16 +4,18 @@ import os
 import tempfile
 import traceback
 import subprocess
-import asyncio
+from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+import json
 
 from schemas import AnalyzeRequest, RepoLoadRequest, RepoQARequest
 from utils import validate_github_url, get_repo_name, fetch_github_issue
 from gitingest import ingest_async
 from services import (
     repo_cache,
-    build_query_engine,
+    build_query_engine_async,
     run_issue_analyzer,
     run_retrieval_agent,
     run_reasoning_agent,
@@ -23,16 +25,50 @@ from services import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
+# ---------------------------------------------------------------------------
+# In-progress tracker so concurrent requests don't double-index the same repo
+# ---------------------------------------------------------------------------
+_indexing_in_progress: dict[str, asyncio.Event] = {}
+
+
+# ---------------------------------------------------------------------------
+# Streaming status helper
+# ---------------------------------------------------------------------------
+
+async def _stream_status(steps: list[tuple[str, any]]) -> AsyncGenerator[str, None]:
+    """
+    Yield newline-delimited JSON status events for SSE / chunked streaming.
+
+    Each step is a (status_label, coroutine_or_value) tuple.  The coroutine is
+    awaited and its result is sent in the final ``done`` event.
+    """
+    for label, coro in steps:
+        yield json.dumps({"status": label}) + "\n"
+        await asyncio.sleep(0)   # flush to client
+        if asyncio.iscoroutine(coro):
+            result = await coro
+        else:
+            result = coro
+    yield json.dumps({"status": "done", "result": result}) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/load-repo
+# ---------------------------------------------------------------------------
+
 @router.post("/load-repo")
 async def load_repo(req: RepoLoadRequest):
     """
     Clone and index a GitHub repository.
 
-    If the repository has already been indexed in the persistent ChromaDB store
-    and is present in the in-memory cache, the endpoint returns immediately with
-    status ``"cached"``.  If it was indexed in a previous server run (ChromaDB
-    collection exists) but is not in memory yet, the index is reloaded without
-    re-cloning.  Otherwise the repo is cloned, ingested, and indexed from scratch.
+    Behaviour:
+    - Already in memory → returns immediately as ``"cached"``.
+    - Currently being indexed by another request → waits for it to finish.
+    - ChromaDB collection exists but not in memory → reloads without cloning.
+    - Fresh repo → clones, ingests, indexes asynchronously.
+
+    Returns progressive JSON status events as a streaming response so the
+    frontend can show live progress feedback.
     """
     if not validate_github_url(req.repo_url):
         raise HTTPException(400, "Invalid GitHub URL")
@@ -40,6 +76,7 @@ async def load_repo(req: RepoLoadRequest):
     cache_key = req.repo_url.rstrip("/")
     repo_name = get_repo_name(req.repo_url)
 
+    # --- Already cached ---
     if cache_key in repo_cache:
         entry = repo_cache[cache_key]
         return {
@@ -49,62 +86,85 @@ async def load_repo(req: RepoLoadRequest):
             "tree":      entry["tree"],
         }
 
+    # --- Dedup: another request is already indexing this repo ---
+    if cache_key in _indexing_in_progress:
+        logger.info(f"Waiting for in-progress indexing of {cache_key} …")
+        await _indexing_in_progress[cache_key].wait()
+        if cache_key in repo_cache:
+            entry = repo_cache[cache_key]
+            return {
+                "status":    "cached",
+                "repo_name": repo_name,
+                "summary":   entry["summary"],
+                "tree":      entry["tree"],
+            }
+        raise HTTPException(500, "Indexing finished but repo not found in cache.")
+
+    # --- Start indexing ---
+    done_event = asyncio.Event()
+    _indexing_in_progress[cache_key] = done_event
+
+    async def _do_index() -> dict:
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                repo_path = os.path.join(tmp_dir, "cloned_repo")
+                logger.info(f"Cloning {req.repo_url} …")
+
+                process = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "clone", "--depth=1", req.repo_url, repo_path],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if process.returncode != 0:
+                    raise RuntimeError(f"Git clone failed: {process.stderr.strip()}")
+
+                logger.info("Clone done. Ingesting …")
+                summary, tree, content = await ingest_async(repo_path)
+
+            logger.info("Building index …")
+            engine_bundle = await build_query_engine_async(content, repo_name)
+
+            repo_cache[cache_key] = {
+                "summary":       summary,
+                "tree":          tree,
+                "engine_bundle": engine_bundle,
+            }
+            return {"status": "loaded", "repo_name": repo_name, "summary": summary, "tree": tree}
+
+        except Exception as exc:
+            logger.exception("FULL INGESTION TRACEBACK")
+            traceback.print_exc()
+            raise exc
+        finally:
+            done_event.set()
+            _indexing_in_progress.pop(cache_key, None)
+
+    return StreamingResponse(
+        _progressive_load(cache_key, repo_name, _do_index),
+        media_type="application/x-ndjson",
+    )
+
+
+async def _progressive_load(
+    cache_key: str,
+    repo_name: str,
+    index_coro_factory,
+) -> AsyncGenerator[str, None]:
+    """Yield newline-delimited JSON progress events while indexing runs."""
+    yield json.dumps({"status": "cloning", "repo_name": repo_name}) + "\n"
+    await asyncio.sleep(0)
     try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_path = os.path.join(tmp_dir, "cloned_repo")
-            logger.info(f"Cloning {req.repo_url} …")
-            # process = await asyncio.create_subprocess_exec(
-            #     "git", "clone", "--depth=1", req.repo_url, repo_path,
-            #     stdout=asyncio.subprocess.PIPE,
-            #     stderr=asyncio.subprocess.PIPE,
-            # )
-            command = ["git", "clone", "--depth=1", req.repo_url, repo_path]
-
-            process = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                capture_output=True,
-                text=True
-            )
-
-            if process.returncode != 0:
-                print(f"Error cloning: {process.stderr}")
-            else:
-                print(f"Success: {process.stdout}")
-
-            if process.returncode != 0:
-                raise RuntimeError(f"Git clone failed: {process.stderr.strip()}")
-
-            logger.info("Clone successful. Ingesting with gitingest…")
-
-            summary, tree, content = await ingest_async(repo_path)
+        result = await index_coro_factory()
+        yield json.dumps({"status": "done", **result}) + "\n"
     except Exception as exc:
-        logger.exception("FULL INGESTION TRACEBACK")
-        traceback.print_exc()
+        yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
 
-        raise HTTPException(
-            status_code=500,
-            detail=repr(exc)
-        )
 
-    try:
-        engine_bundle = build_query_engine(content, repo_name)
-    except Exception as exc:
-        logger.error(f"Index build error: {exc}")
-        raise HTTPException(500, f"Failed to build index: {exc}")
-
-    repo_cache[cache_key] = {
-        "summary":       summary,
-        "tree":          tree,
-        "engine_bundle": engine_bundle,   # contains vector_index, bm25, sources
-    }
-
-    return {
-        "status":    "loaded",
-        "repo_name": repo_name,
-        "summary":   summary,
-        "tree":      tree,
-    }
+# ---------------------------------------------------------------------------
+# POST /api/analyze-issue
+# ---------------------------------------------------------------------------
 
 @router.post("/analyze-issue")
 async def analyze_issue(
@@ -113,13 +173,18 @@ async def analyze_issue(
         default=False,
         description="Set to true to include an optional unified diff in the response.",
     ),
+    stream: bool = Query(
+        default=False,
+        description="Set to true for newline-delimited JSON progress events.",
+    ),
 ):
     """
     Run the full multi-agent pipeline against a loaded repository.
 
-    The issue can be supplied as:
-    - ``issue_url``  – a GitHub issue URL  (e.g. https://github.com/owner/repo/issues/42)
-    - ``issue_text`` – pasted text (with optional ``issue_title``)
+    With ``stream=true`` the response is a newline-delimited JSON stream where
+    each line carries a ``status`` field (``analyzing`` → ``retrieving`` →
+    ``reasoning`` → ``done``).  With ``stream=false`` (default) the full result
+    is returned as a single JSON object.
     """
     if not validate_github_url(req.repo_url):
         raise HTTPException(400, "Invalid GitHub URL")
@@ -141,7 +206,7 @@ async def analyze_issue(
 
     if req.issue_url:
         try:
-            fetched    = await fetch_github_issue(req.issue_url)
+            fetched     = await fetch_github_issue(req.issue_url)
             issue_title = fetched["title"]
             issue_text  = fetched["body"]
             labels_str  = ", ".join(fetched.get("labels", []))
@@ -158,37 +223,70 @@ async def analyze_issue(
     if not issue_full.strip():
         raise HTTPException(400, "Issue body is empty.")
 
-    analysis  = run_issue_analyzer(tree, issue_full)
-    retrieval = run_retrieval_agent(engine_bundle, issue_full)
+    repo_name = get_repo_name(req.repo_url)
 
-    retrieved_file_paths = [
-        f["path"] for f in retrieval.get("relevant_files", []) if "path" in f
-    ]
+    async def _run_pipeline():
+        # Run analysis and retrieval concurrently (both are read-only)
+        analysis_task  = asyncio.to_thread(run_issue_analyzer, tree, issue_full)
+        retrieval_task = asyncio.to_thread(run_retrieval_agent, engine_bundle, issue_full)
 
-    reasoning = run_reasoning_agent(
-        tree=tree,
-        retrieved_files=retrieved_file_paths,
-        sources=sources,
-        issue_full=issue_full,
-        include_patch=generate_patch,
-    )
+        analysis, retrieval = await asyncio.gather(analysis_task, retrieval_task)
 
-    return {
-        "repo_name": get_repo_name(req.repo_url),
-        "issue": {
-            "title":  issue_title,
-            "source": req.issue_url or "manual",
-        },
-        "analysis":  analysis,
-        "retrieval": retrieval,
-        "reasoning": reasoning,
-    }
+        retrieved_file_paths = [
+            f["path"] for f in retrieval.get("relevant_files", []) if "path" in f
+        ]
+
+        reasoning = await asyncio.to_thread(
+            run_reasoning_agent,
+            tree=tree,
+            retrieved_files=retrieved_file_paths,
+            sources=sources,
+            issue_full=issue_full,
+            include_patch=generate_patch,
+        )
+
+        return {
+            "repo_name": repo_name,
+            "issue": {
+                "title":  issue_title,
+                "source": req.issue_url or "manual",
+            },
+            "analysis":  analysis,
+            "retrieval": retrieval,
+            "reasoning": reasoning,
+        }
+
+    if stream:
+        return StreamingResponse(
+            _streamed_pipeline(issue_full, _run_pipeline),
+            media_type="application/x-ndjson",
+        )
+
+    return await _run_pipeline()
+
+
+async def _streamed_pipeline(issue_full: str, pipeline_coro_factory) -> AsyncGenerator[str, None]:
+    """Emit progressive status events, then the final result."""
+    yield json.dumps({"status": "analyzing"}) + "\n"
+    await asyncio.sleep(0)
+    yield json.dumps({"status": "retrieving"}) + "\n"
+    await asyncio.sleep(0)
+    yield json.dumps({"status": "reasoning"}) + "\n"
+    await asyncio.sleep(0)
+    try:
+        result = await pipeline_coro_factory()
+        yield json.dumps({"status": "done", "result": result}) + "\n"
+    except Exception as exc:
+        yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/ask
+# ---------------------------------------------------------------------------
 
 @router.post("/ask")
 async def ask_repo(req: RepoQARequest):
-    """
-    Ask a general question about a loaded repository.
-    """
+    """Ask a general question about a loaded repository."""
     if not validate_github_url(req.repo_url):
         raise HTTPException(400, "Invalid GitHub URL")
 
@@ -199,17 +297,22 @@ async def ask_repo(req: RepoQARequest):
             "Repository not loaded. Call POST /api/load-repo first.",
         )
 
-    entry = repo_cache[cache_key]
+    entry         = repo_cache[cache_key]
     engine_bundle = entry["engine_bundle"]
 
-    qa_result = run_repo_qa(engine_bundle, req.question)
+    qa_result = await asyncio.to_thread(run_repo_qa, engine_bundle, req.question)
 
     return {
-        "repo_name": get_repo_name(req.repo_url),
-        "question": req.question,
-        "answer": qa_result["answer"],
-        "relevant_files": qa_result["relevant_files"]
+        "repo_name":      get_repo_name(req.repo_url),
+        "question":       req.question,
+        "answer":         qa_result["answer"],
+        "relevant_files": qa_result["relevant_files"],
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/repo-status
+# ---------------------------------------------------------------------------
 
 @router.get("/repo-status")
 async def repo_status():
@@ -226,6 +329,16 @@ async def repo_status():
         })
     return {"cached_repos": repos}
 
+
+# ---------------------------------------------------------------------------
+# GET /api/health
+# ---------------------------------------------------------------------------
+
 @router.get("/health")
 async def health():
-    return {"status": "ok", "cached_repos": list(repo_cache.keys())}
+    in_progress = list(_indexing_in_progress.keys())
+    return {
+        "status":       "ok",
+        "cached_repos": list(repo_cache.keys()),
+        "indexing":     in_progress,
+    }
