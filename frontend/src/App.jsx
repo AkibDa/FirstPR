@@ -253,16 +253,20 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo_url: repoUrl }),
       });
-      const data = await res.json();
-      if (res.ok) {
+
+      const text = await res.text();
+      const lines = text.trim().split('\n');
+      const finalResponse = lines[lines.length - 1];
+      const data = JSON.parse(finalResponse);
+      if (res.ok && (data.status === 'done' || data.status === 'loaded' || data.status === 'cached')) {
         setRepoName(data.repo_name);
         setAppState('chat');
       } else {
-        alert('Failed to load repo: ' + data.detail);
+        alert('Failed to load repo: ' + (data.detail || 'Unknown error'));
         setAppState('landing');
       }
     } catch (error) {
-      console.error(error);
+      console.error("Repo load error", error);
       setAppState('landing');
     }
   };
