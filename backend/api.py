@@ -10,6 +10,7 @@ from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from fastapi import Request
 import json
 
 from schemas import AnalyzeRequest, RepoLoadRequest, RepoQARequest
@@ -23,6 +24,7 @@ from services import (
     run_reasoning_agent,
     run_repo_qa,
 )
+from limiter import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -72,7 +74,8 @@ async def check_repo_size(repo_url: str, max_mb: int = 500) -> bool:
     return True
 
 @router.post("/load-repo")
-async def load_repo(req: RepoLoadRequest):
+@limiter.limit("5/minute")
+async def load_repo(request: Request, req: RepoLoadRequest):
     """
     Clone and index a GitHub repository.
 
@@ -175,7 +178,9 @@ async def _progressive_load(
         yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
 
 @router.post("/analyze-issue")
+@limiter.limit("20/minute")
 async def analyze_issue(
+    request: Request,
     req: AnalyzeRequest,
     generate_patch: bool = Query(
         default=False,
@@ -363,7 +368,8 @@ async def _streamed_pipeline(issue_full: str, pipeline_coro_factory) -> AsyncGen
         yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
 
 @router.post("/ask")
-async def ask_repo(req: RepoQARequest):
+@limiter.limit("30/minute")
+async def ask_repo(request: Request,req: RepoQARequest):
     """Ask a general question about a loaded repository."""
     if not validate_github_url(req.repo_url):
         raise HTTPException(400, "Invalid GitHub URL")
@@ -388,7 +394,8 @@ async def ask_repo(req: RepoQARequest):
     }
 
 @router.get("/repo-status")
-async def repo_status():
+@limiter.limit("5/minute")
+async def repo_status(request: Request,):
     """Return metadata about every repository currently held in memory."""
     repos = []
     for url, entry in repo_cache.items():
@@ -403,7 +410,7 @@ async def repo_status():
     return {"cached_repos": repos}
 
 @router.get("/health")
-async def health():
+async def health(request: Request,):
     in_progress = list(_indexing_in_progress.keys())
     return {
         "status":       "ok",
