@@ -56,7 +56,7 @@ async def check_repo_size(repo_url: str, max_mb: int = 500) -> bool:
       return True  # Fallback if URL parsing fails
 
     owner, repo = m.group(1), m.group(2)
-    api_url = f"[https://api.github.com/repos/](https://api.github.com/repos/){owner}/{repo}"
+    api_url = f"https://api.github.com/repos/{owner}/{repo}"
 
     async with httpx.AsyncClient(timeout=10) as client:
       resp = await client.get(api_url)
