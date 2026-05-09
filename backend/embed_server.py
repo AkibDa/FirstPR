@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+import torch
 
 app = FastAPI()
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 model = SentenceTransformer(
-    "BAAI/bge-large-en-v1.5",
-    device="cuda"
+    "BAAI/bge-base-en-v1.5",
+    device=device
 )
 
 class EmbedRequest(BaseModel):
@@ -15,10 +18,14 @@ class EmbedRequest(BaseModel):
 
 @app.post("/v1/embeddings")
 def embeddings(req: EmbedRequest):
+
+    safe_batch_size = min(8, max(1, len(req.input)))
+
     vectors = model.encode(
         req.input,
         normalize_embeddings=True,
-        batch_size=64
+        batch_size=safe_batch_size,
+        show_progress_bar=False,
     )
 
     return {

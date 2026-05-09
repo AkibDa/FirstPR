@@ -58,6 +58,7 @@ if settings.is_production:
         api_key="dummy-key",
         embed_batch_size=settings.embed_batch_size,
     )
+    logger.info(f"Embedding URL: {settings.cloud_embed_url}")
 
 else:
     logger.info(f"Using Local Embedding Device: {device}")
@@ -79,6 +80,7 @@ if settings.is_production:
         max_tokens=2048,
         additional_kwargs={"stop": ["```"]},
     )
+    logger.info(f"LLM URL: {settings.llm_base_url}")
 
 else:
     logger.info("Using Local Ollama Inference")
