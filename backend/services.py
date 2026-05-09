@@ -113,13 +113,13 @@ _IGNORE_DIRS: frozenset[str] = frozenset({
 
 _IGNORE_EXTS: frozenset[str] = frozenset({
     ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
-    ".lock", ".sum",           # lockfiles
-    ".csv", ".tsv",            # tabular data
-    ".json",                   # usually config/fixtures, not logic
-    ".min.js", ".map",         # minified / sourcemaps
-    ".md", ".rst", ".txt",     # prose docs
-    ".ipynb",                  # notebooks
-    ".pb", ".onnx", ".pt", ".pth",  # model weights
+    ".lock", ".sum",
+    ".csv", ".tsv",
+    ".json",
+    ".min.js", ".map",
+    ".md", ".rst", ".txt",
+    ".ipynb",
+    ".pb", ".onnx", ".pt", ".pth",
     ".whl", ".egg",
     ".toml", ".yaml", ".yml", ".ini", ".cfg", ".env",
     ".css", ".scss", ".less",
@@ -128,7 +128,6 @@ _IGNORE_EXTS: frozenset[str] = frozenset({
     ".sh", ".bat", ".ps1",
 })
 
-# Files whose names signal low value regardless of extension
 _IGNORE_NAME_PATTERNS: Tuple[str, ...] = (
     "setup.py", "setup.cfg", "pyproject.toml",
     "requirements.txt", "requirements-dev.txt",
@@ -140,7 +139,6 @@ _IGNORE_NAME_PATTERNS: Tuple[str, ...] = (
     "tsconfig.json", "eslint", "prettier", ".editorconfig",
 )
 
-# Preferred source directories — files here get priority embedding slots
 _CORE_DIR_HINTS: frozenset[str] = frozenset({
     "src", "lib", "core", "app", "api", "server",
     "pkg", "internal", "backend", "service", "services",
@@ -188,9 +186,7 @@ MODEL_KEYWORDS = [
     "detect",
 ]
 
-# Hard limit: never embed more than this many files per repo
 _MAX_EMBED_FILES = 1200
-# Hard limit: files larger than this char count are chunked more aggressively
 _LARGE_FILE_THRESHOLD = 8_000
 
 ARCHITECTURE_KEYWORDS = {
@@ -350,18 +346,14 @@ def build_weighted_query_terms(
 
   weighted = []
 
-  # Generic terms
   weighted.extend(generic)
 
-  # Symbols are VERY important
   for sym in plan["symbols"]:
     weighted.extend([sym.lower()] * 5)
 
-  # Operations are important
   for op in plan["operations"]:
     weighted.extend([op] * 3)
 
-  # Modules are important
   for mod in plan["modules"]:
     weighted.extend([mod.lower()] * 4)
 
@@ -447,16 +439,13 @@ def _should_skip_file(file_path: str) -> bool:
     fp_lower = file_path.lower().replace("\\", "/")
     parts = fp_lower.split("/")
 
-    # Skip if any directory segment is in the ignore list
     if any(p in _IGNORE_DIRS for p in parts[:-1]):
         return True
 
-    # Skip by extension
     for ext in _IGNORE_EXTS:
         if fp_lower.endswith(ext):
             return True
 
-    # Skip by filename pattern
     basename = parts[-1]
     if any(basename.startswith(pat.lower()) for pat in _IGNORE_NAME_PATTERNS):
         return True
@@ -522,7 +511,6 @@ def _split_repo_content(content: str) -> List[Tuple[str, str]]:
                 continue
             raw_files.append((fp, code))
 
-    # Sort by priority (core files first), then cap at _MAX_EMBED_FILES
     raw_files.sort(key=lambda x: _file_priority(x[0]))
     files = raw_files[:_MAX_EMBED_FILES]
 
@@ -600,7 +588,6 @@ def build_query_engine(content: str, repo_name: str) -> dict:
                 excluded_llm_metadata_keys=["functions", "classes", "imports", "priority"],
             ))
 
-        # Adaptive chunking: group docs by size so large files use smaller chunks
         small_docs = [d for d in docs if len(d.text) <= _LARGE_FILE_THRESHOLD]
         large_docs = [d for d in docs if len(d.text) > _LARGE_FILE_THRESHOLD]
 
@@ -622,12 +609,10 @@ def build_query_engine(content: str, repo_name: str) -> dict:
             f"{len(all_nodes)} chunks from {len(files)} files."
         )
 
-    # BM25 — built over whole-file text (not chunks) for file-level matching
     bm25_corpus, bm25_nodes = [], []
     for fp, src in files:
         tokens = re.findall(r"[a-zA-Z_]\w*", src)
         bm25_corpus.append(tokens)
-        # Store only first 4 000 chars to keep memory reasonable
         bm25_nodes.append({"file_path": fp, "text": src[:4_000]})
 
     bm25 = BM25Okapi(bm25_corpus) if bm25_corpus else None
@@ -693,7 +678,6 @@ def extract_json(text: str) -> dict:
 
 def run_issue_analyzer(tree: str, issue_full: str) -> dict:
     """Categorise the issue: type, difficulty, required skills, affected areas."""
-    # Trim tree more aggressively — the analyzer only needs structural context
     prompt = f"""You are an expert open-source contributor mentor. Analyse the GitHub issue and return ONLY valid JSON (no markdown fences, no extra text).
 
 Repository structure (truncated):
@@ -752,10 +736,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
 
   candidates: Dict[str, Tuple[float, str]] = {}
 
-  # =========================================================
-  # 1. SEMANTIC RETRIEVAL
-  # =========================================================
-
   try:
     retriever = vector_index.as_retriever(similarity_top_k=30)
 
@@ -782,10 +762,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
 
   except Exception as exc:
     logger.warning(f"Vector retrieval failed: {exc}")
-
-  # =========================================================
-  # 2. BM25 RETRIEVAL
-  # =========================================================
 
   if bm25 and bm25_nodes:
 
@@ -830,10 +806,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
           "bm25"
         )
 
-  # =========================================================
-  # 3. SYMBOL RETRIEVAL
-  # =========================================================
-
   symbol_hits = symbol_retrieval(
     sources,
     plan["symbols"],
@@ -859,10 +831,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
         "symbol"
       )
 
-  # =========================================================
-  # 4. ROLE RETRIEVAL
-  # =========================================================
-
   role_hits = role_based_retrieval(
     sources,
     plan["role_hints"],
@@ -886,10 +854,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
         "role"
       )
 
-  # =========================================================
-  # 5. FILEPATH BOOSTING
-  # =========================================================
-
   for fp in list(candidates.keys()):
 
     boost = filepath_signal_score(
@@ -905,10 +869,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
         f"{old_method}+filepath"
       )
 
-  # =========================================================
-  # 6. PRE-RERANK FILTERING
-  # =========================================================
-
   sorted_candidates = sorted(
     candidates.items(),
     key=lambda x: x[1][0],
@@ -917,20 +877,12 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
 
   candidates = dict(sorted_candidates[:40])
 
-  # =========================================================
-  # 7. RERANK
-  # =========================================================
-
   reranker_result = rerank(
     candidates=candidates,
     sources=sources,
     issue_full=expanded_issue,
     top_k=6,
   )
-
-  # =========================================================
-  # 8. LOW CONFIDENCE EXPANSION
-  # =========================================================
 
   if reranker_result.low_confidence:
 
@@ -980,10 +932,6 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
     f"anchor={reranker_result.anchor_file} | "
     f"low_conf={reranker_result.low_confidence}"
   )
-
-  # =========================================================
-  # 9. RESPONSE
-  # =========================================================
 
   relevant_files = []
 
@@ -1088,7 +1036,7 @@ def _build_code_context(
         snippet = src[:max_chars_per_file]
         if total + len(snippet) > total_cap:
             remaining = total_cap - total
-            if remaining < 200:          # not worth adding a tiny snippet
+            if remaining < 200:
                 break
             snippet = snippet[:remaining]
         parts.append(f"--- File: {fp} ---\n{snippet}")
@@ -1147,7 +1095,6 @@ def _extract_first_path_token(text: str) -> str:
     """Extract a likely file path token from the start of a string."""
     if not text:
         return ""
-    # Handles: "(path/file.py) ...", "path/file.py — ...", "path/file.py → ..."
     t = text.strip().lstrip("(")
     return re.split(r"[\s)→:,—–-]", t, maxsplit=1)[0].strip()
 
@@ -1195,8 +1142,9 @@ def find_model_related_files(sources: Dict[str, str]) -> List[dict]:
         score += 1
         matched_keywords.append(kw)
 
-    # Boost backend/python inference files
-    if fp.endswith(".py"):
+    if fp.endswith(".py",) and any(kw in src_lower for kw in [".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
+            ".java", ".kt", ".c", ".cpp", ".h", ".rb", ".md",
+            ".yaml", ".yml", ".toml", ".json",".ipynb"]):
       score += 2
 
     if any(x in fp.lower() for x in [
@@ -1329,8 +1277,6 @@ def run_reasoning_agent(
     anchor_file      = reranker_meta.get("anchor_file")
     overall_score    = reranker_meta.get("overall_confidence")
 
-    # Use a core/supporting split with context-importance decay.
-    # Anchor file is always treated as the highest-importance core file.
     ordered = list(dict.fromkeys(
         ([anchor_file] if anchor_file and anchor_file in retrieved_files else []) +
         [f for f in retrieved_files if f != anchor_file]
@@ -1345,16 +1291,11 @@ def run_reasoning_agent(
         supporting_max_chars=650,
         total_cap=8_000,
     )
-
-    # Static dependency chain — never LLM-generated
     dep_chain: List[str] = []
-    # Only expand dependencies from core files; supporting files should never
-    # dominate reasoning unless retrieval signals are strong enough to elevate them.
     for fp in core_files[:2]:
         dep_chain.extend(build_dependency_chain(fp, sources))
     dep_chain = list(dict.fromkeys(dep_chain))[:12]
 
-    # File roles
     file_role_lines: List[str] = []
     for fp in retrieved_files:
         src  = sources.get(fp, "")
@@ -1362,7 +1303,6 @@ def run_reasoning_agent(
         file_role_lines.append(f"  - {fp}  [{role}]")
     file_role_str = "\n".join(file_role_lines) or "  (none)"
 
-    # Anchor hint for the model
     anchor_hint = (
         f"ANCHOR FILE (highest symbol-match confidence): {anchor_file}\n"
         if anchor_file else ""
@@ -1381,7 +1321,6 @@ def run_reasoning_agent(
         '"Based on the retrieved source code…"'
     )
 
-    # Issue-centric focus entities — constrain the model to stay on-domain.
     issue_entities = extract_issue_entities(issue_full)
     focus_symbols  = [e.text for e in issue_entities if e.kind in ("symbol", "error_type") and e.confidence >= 0.60][:12]
     focus_paths    = [e.text for e in issue_entities if e.kind == "filepath" and e.confidence >= 0.70][:8]
@@ -1456,7 +1395,6 @@ Start your "explanation" with exactly: {uncertainty_note}
   "confidence_note": "<one sentence summarising how confident the localisation is and why>"
 }}"""
 
-    # Valid path set for post-processing validation
     valid_path_set: set = set(retrieved_files)
 
     def _sanitise(result: dict) -> dict:
@@ -1464,21 +1402,17 @@ Start your "explanation" with exactly: {uncertainty_note}
         Strip any file paths the LLM invented that aren't in the retrieved set.
         Mutates and returns the result dict.
         """
-        # where_to_start: extract path prefix and validate
         wts = result.get("where_to_start", "")
         if wts:
-            # The model may write "path/file.py → function_name()" — take the path part
             wts_path = re.split(r"[\s→:,]", wts)[0].strip()
             if wts_path and wts_path not in valid_path_set:
                 logger.warning(f"Reasoning agent hallucinated where_to_start path: {wts_path!r}")
                 result["where_to_start"] = retrieved_files[0] if retrieved_files else ""
 
-        # what_to_read_first: filter out invented paths
         wtrf = result.get("what_to_read_first", [])
         if isinstance(wtrf, list):
             cleaned = []
             for item in wtrf:
-                # Item format: "path/file.py — description"
                 path_part = re.split(r"[\s—–-]", item)[0].strip()
                 if path_part in valid_path_set or path_part not in sources:
                     cleaned.append(item)
@@ -1486,13 +1420,11 @@ Start your "explanation" with exactly: {uncertainty_note}
                     logger.warning(f"Stripped hallucinated path from what_to_read_first: {path_part!r}")
             result["what_to_read_first"] = cleaned
 
-        # logic_trace: drop steps that reference non-retrieved files
         result["logic_trace"] = _filter_list_of_strings_by_paths(
             result.get("logic_trace", []),
             valid_path_set,
         )
 
-        # contribution_path: validate files_involved
         for step in result.get("contribution_path", []):
             fi = step.get("files_involved", [])
             if isinstance(fi, list):
@@ -1522,8 +1454,6 @@ Start your "explanation" with exactly: {uncertainty_note}
                 "low_confidence": low_confidence,
             }
 
-            # Always expose a tight "fix zone" so callers can act without
-            # reading the entire narrative.
             result["most_likely_fix_zone"] = {
                 "file_path":          core_files[0] if core_files else (retrieved_files[0] if retrieved_files else ""),
                 "localisation_tier":  confidence_tier,
@@ -1532,9 +1462,6 @@ Start your "explanation" with exactly: {uncertainty_note}
                 "focus_symbols":      focus_symbols,
             }
 
-            # Hard-abstain guardrail: if retrieval is low-confidence, force the
-            # response to stay in "mentor mode" (no strong claims) by ensuring
-            # the model includes an explicit uncertainty note.
             if low_confidence:
                 expl = str(result.get("explanation", "") or "")
                 if "localisation confidence is low" not in expl.lower():
@@ -1557,9 +1484,6 @@ Start your "explanation" with exactly: {uncertainty_note}
             "localisation_confidence": reranker_meta,
         }
 
-    # If localisation confidence is low, do not return an auto patch by default.
-    # (Even when include_patch=True, this protects production usage from
-    # generating misleading diffs against the wrong file.)
     if include_patch:
         if not low_confidence:
             result["suggested_patch"] = _generate_patch(retrieved_files, sources, issue_full)
@@ -1616,10 +1540,6 @@ def run_repo_qa(engine_bundle: dict, question: str) -> dict:
     sources: Dict[str, str] = engine_bundle["sources"]
     question_lower = question.lower()
 
-    # ---------------------------------------------------------
-    # Architecture Query Mode
-    # ---------------------------------------------------------
-
     is_architecture_query = any(
       q in question_lower
       for q in ARCHITECTURE_QUERIES
@@ -1662,7 +1582,6 @@ def run_repo_qa(engine_bundle: dict, question: str) -> dict:
     retrieved_files = [f["path"] for f in retrieval.get("relevant_files", [])]
     sources: Dict[str, str] = engine_bundle["sources"]
 
-    # Tighter context than before (2 000 per file, 6 000 total)
     code_context = _build_code_context(retrieved_files, sources, max_chars_per_file=2_000, total_cap=6_000)
     valid_paths  = "\n".join(f"  - {fp}" for fp in retrieved_files) or "  (none)"
 

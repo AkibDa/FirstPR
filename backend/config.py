@@ -22,7 +22,6 @@ def _env_int(key: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    # ── Runtime mode ─────────────────────────────────────────────
     app_env: str = field(
         default_factory=lambda: _env("APP_ENV", "development").lower()
     )

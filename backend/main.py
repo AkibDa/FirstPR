@@ -10,13 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import configure_logging, settings
 from api import router
 
-# Configure structured logging before anything else
 configure_logging()
 
 import logging
 logger = logging.getLogger(__name__)
 
-# Validate required env vars for the current mode — raises on misconfiguration
 settings.validate()
 
 logger.info(

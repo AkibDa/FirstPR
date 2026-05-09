@@ -38,7 +38,7 @@ async def _stream_status(steps: list[tuple[str, any]]) -> AsyncGenerator[str, No
     """
     for label, coro in steps:
         yield json.dumps({"status": label}) + "\n"
-        await asyncio.sleep(0)   # flush to client
+        await asyncio.sleep(0)
         if asyncio.iscoroutine(coro):
             result = await coro
         else:
@@ -49,11 +49,10 @@ async def check_repo_size(repo_url: str, max_mb: int = 500) -> bool:
   """Check the GitHub API to ensure the repo isn't too massive to process."""
   try:
     from utils import parse_github_issue_url
-    # Reusing the regex logic to grab owner/repo
     pattern = r"https://github\.com/([^/]+)/([^/]+)"
     m = re.match(pattern, repo_url.rstrip("/"))
     if not m:
-      return True  # Fallback if URL parsing fails
+      return True
 
     owner, repo = m.group(1), m.group(2)
     api_url = f"https://api.github.com/repos/{owner}/{repo}"
@@ -262,10 +261,6 @@ async def analyze_issue(
           f"Could not fetch GitHub issue: {exc}"
         )
 
-    # =========================================================
-    # Validation
-    # =========================================================
-
     if not any([
       issue_title,
       issue_text,
@@ -280,10 +275,6 @@ async def analyze_issue(
           "- issue_url"
         )
       )
-
-    # =========================================================
-    # Build Retrieval Query
-    # =========================================================
 
     issue_parts = []
 
@@ -314,7 +305,6 @@ async def analyze_issue(
     repo_name = get_repo_name(req.repo_url)
 
     async def _run_pipeline():
-        # Run analysis and retrieval concurrently (both are read-only)
         analysis_task  = asyncio.to_thread(run_issue_analyzer, tree, issue_full)
         retrieval_task = asyncio.to_thread(run_retrieval_agent, engine_bundle, issue_full)
 
