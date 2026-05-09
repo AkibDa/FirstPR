@@ -191,4 +191,3 @@ def top_symbols(entities: Iterable[IssueEntity], *, min_conf: float = 0.60) -> L
 def top_filepaths(entities: Iterable[IssueEntity], *, min_conf: float = 0.70) -> List[str]:
     """Convenience: return filepath texts above confidence threshold."""
     return [e.text for e in entities if e.kind == "filepath" and e.confidence >= min_conf]
-

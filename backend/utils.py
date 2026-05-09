@@ -124,8 +124,13 @@ def build_dependency_chain(
     Only local imports (files that exist as keys in *all_sources*) are followed.
     """
     module_to_path: Dict[str, str] = {}
+    priority = [".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
+            ".java", ".kt", ".c", ".cpp", ".h", ".rb", ".md",
+            ".yaml", ".yml", ".toml", ".json",".ipynb"]
     for fp in all_sources:
-        without_ext = fp[:-3] if fp.endswith(".py") else fp
+        without_ext = fp[:-3] if fp.endswith((".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
+            ".java", ".kt", ".c", ".cpp", ".h", ".rb", ".md",
+            ".yaml", ".yml", ".toml", ".json",".ipynb")) else fp
         module_to_path[without_ext.replace("/", ".").replace("\\", ".")] = fp
         stem = without_ext.split("/")[-1].split("\\")[-1]
         module_to_path.setdefault(stem, fp)

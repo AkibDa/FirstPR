@@ -1,21 +1,94 @@
-version: '3.8'
-services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - VLLM_BASE_URL=${VLLM_BASE_URL}
-    volumes:
-      - chroma_data:/app/chroma_db
-    depends_on:
-      - redis
+version: "3.11"
 
+x-api-common: &api-common
+  build: .
+  ports:
+    - "8000:8000"
+  volumes:
+    - chroma_data:/app/chroma_db
+  depends_on:
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  # ── Development API (local Ollama, CPU embeddings) ──────────────────────────
+  api:
+    <<: *api-common
+    environment:
+      APP_ENV:           development
+      REDIS_URL:         redis://redis:6379/0
+      CHROMA_PATH:       /app/chroma_db
+      OLLAMA_BASE_URL:   ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      LOCAL_LLM_MODEL:   ${LOCAL_LLM_MODEL:-qwen2.5-coder:1.5b}
+      LOCAL_EMBED_MODEL: ${LOCAL_EMBED_MODEL:-BAAI/bge-base-en-v1.5}
+      LOCAL_RERANK_MODEL: ${LOCAL_RERANK_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+      EMBED_BATCH_SIZE:  ${EMBED_BATCH_SIZE:-32}
+      LLM_TIMEOUT:       ${LLM_TIMEOUT:-120}
+      MAX_REPO_MB:       ${MAX_REPO_MB:-300}
+      LOG_LEVEL:         ${LOG_LEVEL:-INFO}
+    profiles: [""]
+
+  # ── Production API (AMD GPU cloud) ──────────────────────────────────────────
+  api-prod:
+    <<: *api-common
+    environment:
+      APP_ENV:            production
+      REDIS_URL:          redis://redis:6379/0
+      CHROMA_PATH:        /app/chroma_db
+      VLLM_BASE_URL:      ${VLLM_BASE_URL:?VLLM_BASE_URL is required in production}
+      CLOUD_LLM_MODEL:    ${CLOUD_LLM_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct}
+      CLOUD_EMBED_URL:    ${CLOUD_EMBED_URL:-http://embed-prod:8081}
+      CLOUD_EMBED_MODEL:  ${CLOUD_EMBED_MODEL:-BAAI/bge-large-en-v1.5}
+      CLOUD_RERANK_URL:   ${CLOUD_RERANK_URL:-http://rerank-prod:8082/rerank}
+      EMBED_BATCH_SIZE:   ${EMBED_BATCH_SIZE:-64}
+      LLM_TIMEOUT:        ${LLM_TIMEOUT:-180}
+      MAX_REPO_MB:        ${MAX_REPO_MB:-500}
+      LOG_LEVEL:          ${LOG_LEVEL:-INFO}
+    depends_on:
+      - embed-prod
+      - rerank-prod
+    profiles: ["production"]
+
+  # ── Production TEI Embeddings (AMD GPU) ─────────────────────────────────────
+  embed-prod:
+    image: ghcr.io/huggingface/text-embeddings-inference:turing-1.5
+    ports:
+      - "8081:80"
+    environment:
+      MODEL_ID: BAAI/bge-large-en-v1.5
+    volumes:
+      - hf_cache:/data
+    profiles: ["production"]
+    restart: unless-stopped
+
+  # ── Production TEI Reranker (AMD GPU) ───────────────────────────────────────
+  rerank-prod:
+    image: ghcr.io/huggingface/text-embeddings-inference:turing-1.5
+    ports:
+      - "8082:80"
+    environment:
+      MODEL_ID: cross-encoder/ms-marco-MiniLM-L-6-v2
+    volumes:
+      - hf_cache:/data
+    profiles: ["production"]
+    restart: unless-stopped
+
+  # ── Redis (shared) ──────────────────────────────────────────────────────────
   redis:
-    image: "redis:alpine"
+    image: redis:7-alpine
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   chroma_data:
+  redis_data:
+  hf_cache:
