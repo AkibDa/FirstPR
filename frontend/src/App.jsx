@@ -156,42 +156,19 @@ const globalStyles = `
     position: relative;
     display: inline-block;
   }
-  .glitch-wrapper::before,
-  .glitch-wrapper::after {
-    content: attr(data-text);
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    opacity: 0.8;
-  }
-  .glitch-wrapper::before {
-    color: #0ff; /* Cyan split */
-    z-index: -1;
-    animation: glitch-anim-1 2s infinite linear alternate-reverse;
-  }
-  .glitch-wrapper::after {
-    color: #f0f; /* Magenta split */
-    z-index: -2;
-    animation: glitch-anim-2 3s infinite linear alternate-reverse;
-  }
   
-  @keyframes glitch-anim-1 {
-    0% { clip-path: inset(20% 0 80% 0); transform: translate(-2px, 1px); }
-    20% { clip-path: inset(60% 0 10% 0); transform: translate(2px, -1px); }
-    40% { clip-path: inset(40% 0 50% 0); transform: translate(-2px, 2px); }
-    60% { clip-path: inset(80% 0 5% 0); transform: translate(2px, -2px); }
-    80% { clip-path: inset(10% 0 70% 0); transform: translate(-1px, 1px); }
-    100% { clip-path: inset(30% 0 50% 0); transform: translate(1px, -1px); }
+  .glitch-wrapper {
+    position: relative;
+    display: inline-block;
+    animation: cyber-glitch 4s infinite;
   }
-  @keyframes glitch-anim-2 {
-    0% { clip-path: inset(10% 0 60% 0); transform: translate(2px, -1px); }
-    20% { clip-path: inset(30% 0 20% 0); transform: translate(-2px, 2px); }
-    40% { clip-path: inset(70% 0 10% 0); transform: translate(2px, -2px); }
-    60% { clip-path: inset(20% 0 50% 0); transform: translate(-1px, 1px); }
-    80% { clip-path: inset(50% 0 30% 0); transform: translate(1px, -1px); }
-    100% { clip-path: inset(5% 0 80% 0); transform: translate(-2px, 1px); }
+
+  /* RGB split and skew that flashes every 4 seconds */
+  @keyframes cyber-glitch {
+    0%, 94%, 100% { transform: none; text-shadow: 0 0 20px var(--green-dim); }
+    95% { transform: skewX(-15deg); text-shadow: -4px 0 #ff00ff, 4px 0 #00ffff; }
+    97% { transform: skewX(15deg); text-shadow: 4px 0 #ff00ff, -4px 0 #00ffff; }
+    99% { transform: none; text-shadow: -2px 2px #ff00ff, 2px -2px #00ffff; }
   }
 `;
 
@@ -244,11 +221,7 @@ function MatrixBg() {
 
 function GlitchText({ text, className = '' }) {
   return (
-    <span 
-      className={`glitch-wrapper ${className}`} 
-      data-text={text}
-      style={{ position: 'relative', display: 'inline-block' }}
-    >
+    <span className={`glitch-wrapper ${className}`}>
       {text}
     </span>
   );
@@ -302,6 +275,27 @@ export default function App() {
         body: JSON.stringify({ repo_url: repoUrl }),
       });
 
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Server error');
+      }
+
+      // FIX: Check if the backend returned a standard JSON object (Cached Repo)
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        setLoadingStatus(data.status);
+        if (data.status === 'cached' || data.status === 'done' || data.status === 'loaded') {
+          setRepoName(data.repo_name || data.result?.repo_name);
+          setTimeout(() => setAppState('chat'), 600);
+        } else {
+          alert('Failed to load repo: ' + (data.detail || 'Unknown error'));
+          setAppState('landing');
+        }
+        return; // Exit early since it's not a stream
+      }
+
+      // OTHERWISE: Handle the NDJSON stream (New Repo Indexing)
       if (!res.body) throw new Error("No response body");
 
       const reader = res.body.getReader();
@@ -315,20 +309,18 @@ export default function App() {
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
       
-        buffer = lines.pop();
+        buffer = lines.pop(); // Keep the last incomplete chunk
 
         for (const line of lines) {
           if (!line.trim()) continue;
 
           try {
             const data = JSON.parse(line);
-           
             setLoadingStatus(data.status); 
 
             if (data.status === 'cached' || data.status === 'done' || data.status === 'loaded') {
-             
               setRepoName(data.repo_name || data.result?.repo_name);
-              setAppState('chat');
+              setTimeout(() => setAppState('chat'), 600);
               return; 
             } else if (data.status === 'error') {
               alert('Failed to load repo: ' + data.detail);
@@ -342,7 +334,7 @@ export default function App() {
       }
     } catch (error) {
       console.error(error);
-      alert('Connection error. Is the backend running?');
+      alert('Connection error: ' + error.message);
       setAppState('landing');
     }
   };
@@ -403,7 +395,7 @@ export default function App() {
                           lineHeight: 1.2,
                           marginBottom: 8,
                         }}>
-                          <GlitchText text="FIRSTPR" /><span style={{ color: 'var(--text-muted)' }}>_</span>MENTOR
+                          <GlitchText text="FIRSTPR_MENTOR" /><span style={{ color: 'var(--text-muted)' }}></span>
                     </h1>
                   </span>
                 </div>
@@ -545,8 +537,8 @@ export default function App() {
                   animate={{ 
                     width: 
                       loadingStatus === 'connecting...' ? '15%' :
-                      loadingStatus === 'cloning' ? '50%' :
-                      (loadingStatus === 'done' || loadingStatus === 'cached' || loadingStatus === 'loaded') ? '100%' : '20%'
+                      loadingStatus === 'cloning' ? '40%' :
+                      (loadingStatus === 'done' || loadingStatus === 'cached' || loadingStatus === 'loaded') ? '100%' : '75%'
                   }}
                   transition={{ duration: 0.5, ease: 'easeOut' }}
                   style={{ height: '100%', background: 'var(--green)', boxShadow: '0 0 8px var(--green)', borderRadius: 2 }}
@@ -561,7 +553,12 @@ export default function App() {
               key="chat"
               repoUrl={repoUrl}
               repoName={repoName}
-              onReset={() => setAppState('landing')}
+              onReset={() => { 
+                setAppState('landing');
+                setRepoUrl('');
+                setRepoName('');
+                setLoadingStatus('');
+              }}
             />
           )}
         </AnimatePresence>
@@ -570,307 +567,3 @@ export default function App() {
   );
 }
 
-// --- CHAT INTERFACE ---
-// function ChatInterface({ repoUrl, repoName, onReset }) {
-//   const [messages, setMessages] = useState([
-//     { role: 'assistant', content: `Repository [${repoName}] indexed successfully.\n\nAre you looking to understand a specific issue, or do you have a general question about the codebase?` }
-//   ]);
-//   const [input, setInput] = useState('');
-//   const [isTyping, setIsTyping] = useState(false);
-//   const bottomRef = useRef(null);
-//   const chatRef = useRef(null);
-
-//   useEffect(() => {
-//     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-//   }, [messages, isTyping]);
-
-//   const handleSendMessage = async (e) => {
-//     e.preventDefault();
-//     if (!input.trim()) return;
-
-//     const userMsg = input;
-//     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-//     setInput('');
-//     setIsTyping(true);
-
-//     const isIssue = userMsg.includes('github.com') && userMsg.includes('/issues/');
-//     const endpoint = isIssue ? '/api/analyze-issue' : '/api/ask';
-//     const payload = isIssue
-//       ? { repo_url: repoUrl, issue_url: userMsg }
-//       : { repo_url: repoUrl, question: userMsg };
-
-//     try {
-//       const res = await fetch(`http://127.0.0.1:8000${endpoint}`, {
-//         method: 'POST',
-//         headers: { 'Content-Type': 'application/json' },
-//         body: JSON.stringify(payload),
-//       });
-//       const data = await res.json();
-//       let botReply = isIssue
-//         ? `[ANALYSIS] ${data.issue.title}\n\nSTART_AT: ${data.reasoning.where_to_start}\n\n${data.reasoning.explanation}`
-//         : data.answer;
-
-//       setMessages(prev => [...prev, { role: 'assistant', content: botReply }]);
-//     } catch {
-//       setMessages(prev => [...prev, { role: 'assistant', content: '[ERROR] Failed to reach backend. Check your connection.' }]);
-//     } finally {
-//       setIsTyping(false);
-//     }
-//   };
-
-//   return (
-//     <motion.div
-//       initial={{ opacity: 0 }}
-//       animate={{ opacity: 1 }}
-//       style={{
-//         width: '100vw',
-//         height: '100vh',
-//         display: 'flex',
-//         flexDirection: 'column',
-//         position: 'relative',
-//         zIndex: 2,
-//         background: 'rgba(0,5,0,0.92)',
-//       }}
-//     >
-//       {/* Header */}
-//       <div style={{
-//         display: 'flex',
-//         alignItems: 'center',
-//         justifyContent: 'space-between',
-//         padding: '14px 28px',
-//         borderBottom: '1px solid var(--border)',
-//         background: 'rgba(0,20,0,0.8)',
-//         backdropFilter: 'blur(10px)',
-//         flexShrink: 0,
-//       }}>
-//         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-//           <div style={{
-//             border: '1px solid var(--border-active)',
-//             borderRadius: 3,
-//             padding: '6px 10px',
-//             display: 'flex',
-//             alignItems: 'center',
-//             gap: 6,
-//             background: 'rgba(0,255,65,0.05)',
-//           }}>
-//             <GitBranch size={14} color="var(--green)" />
-//             <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: 'var(--green)', textShadow: '0 0 10px var(--green)' }}>
-//               {repoName.toUpperCase()}
-//             </span>
-//           </div>
-//           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-//             <span style={{
-//               width: 6, height: 6, borderRadius: '50%',
-//               background: 'var(--green)',
-//               boxShadow: '0 0 8px var(--green)',
-//               display: 'inline-block',
-//               animation: 'blink 2s step-end infinite',
-//             }} />
-//             <span style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: 2 }}>INDEX ACTIVE</span>
-//           </div>
-//         </div>
-//         <button
-//           onClick={onReset}
-//           style={{
-//             background: 'transparent',
-//             border: '1px solid var(--border)',
-//             borderRadius: 3,
-//             padding: '6px 14px',
-//             color: 'var(--text-muted)',
-//             fontFamily: "'JetBrains Mono', monospace",
-//             fontSize: 11,
-//             cursor: 'pointer',
-//             letterSpacing: 1,
-//             transition: 'all 0.2s',
-//           }}
-//           onMouseEnter={e => {
-//             e.currentTarget.style.borderColor = 'var(--green)';
-//             e.currentTarget.style.color = 'var(--green)';
-//           }}
-//           onMouseLeave={e => {
-//             e.currentTarget.style.borderColor = 'var(--border)';
-//             e.currentTarget.style.color = 'var(--text-muted)';
-//           }}
-//         >
-//           [SWITCH REPO]
-//         </button>
-//       </div>
-
-//       {/* Chat messages - scroll area extends to screen edge */}
-//       <div
-//         ref={chatRef}
-//         className="chat-scroll"
-//         style={{
-//           flex: 1,
-//           padding: '28px 28px 20px 28px',
-//           display: 'flex',
-//           flexDirection: 'column',
-//           gap: 20,
-//           /* extend to right edge for scrollbar */
-//           paddingRight: 28,
-//           marginRight: 0,
-//           overflowX: 'hidden',
-//         }}
-//       >
-//         {messages.map((msg, idx) => (
-//           <motion.div
-//             key={idx}
-//             initial={{ opacity: 0, x: msg.role === 'user' ? 20 : -20 }}
-//             animate={{ opacity: 1, x: 0 }}
-//             transition={{ duration: 0.3 }}
-//             style={{
-//               display: 'flex',
-//               justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-//             }}
-//           >
-//             {msg.role === 'assistant' && (
-//               <div style={{ display: 'flex', flexDirection: 'column', maxWidth: '80%', gap: 4 }}>
-//                 <span style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: 2, paddingLeft: 2 }}>
-//                   MENTOR@FIRSTPR $
-//                 </span>
-//                 <div style={{
-//                   background: 'rgba(0,255,65,0.03)',
-//                   border: '1px solid var(--border)',
-//                   borderRadius: '0 6px 6px 6px',
-//                   padding: '14px 18px',
-//                   position: 'relative',
-//                   boxShadow: '0 0 20px rgba(0,255,65,0.04)',
-//                 }}>
-//                   <div className="scanline-fast" />
-//                   <p style={{
-//                     whiteSpace: 'pre-wrap',
-//                     lineHeight: 1.75,
-//                     fontSize: 13,
-//                     color: 'var(--green)',
-//                     fontFamily: "'JetBrains Mono', monospace",
-//                   }}>
-//                     {msg.content}
-//                   </p>
-//                 </div>
-//               </div>
-//             )}
-//             {msg.role === 'user' && (
-//               <div style={{ display: 'flex', flexDirection: 'column', maxWidth: '70%', gap: 4, alignItems: 'flex-end' }}>
-//                 <span style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: 2, paddingRight: 2 }}>
-//                   YOU $
-//                 </span>
-//                 <div style={{
-//                   background: 'rgba(0,255,65,0.08)',
-//                   border: '1px solid var(--border-active)',
-//                   borderRadius: '6px 0 6px 6px',
-//                   padding: '12px 16px',
-//                   boxShadow: '0 0 12px rgba(0,255,65,0.06)',
-//                 }}>
-//                   <p style={{
-//                     whiteSpace: 'pre-wrap',
-//                     lineHeight: 1.7,
-//                     fontSize: 13,
-//                     color: 'var(--green)',
-//                     fontFamily: "'JetBrains Mono', monospace",
-//                     textShadow: '0 0 8px rgba(0,255,65,0.3)',
-//                   }}>
-//                     {msg.content}
-//                   </p>
-//                 </div>
-//               </div>
-//             )}
-//           </motion.div>
-//         ))}
-
-//         {isTyping && (
-//           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ display: 'flex', justifyContent: 'flex-start' }}>
-//             <div style={{
-//               border: '1px solid var(--border)',
-//               borderRadius: '0 6px 6px 6px',
-//               padding: '14px 18px',
-//               display: 'flex',
-//               alignItems: 'center',
-//               gap: 4,
-//               background: 'rgba(0,255,65,0.02)',
-//             }}>
-//               {[0, 150, 300].map((delay, i) => (
-//                 <motion.span
-//                   key={i}
-//                   animate={{ opacity: [0.2, 1, 0.2], scaleY: [0.5, 1, 0.5] }}
-//                   transition={{ repeat: Infinity, duration: 0.9, delay: delay / 1000 }}
-//                   style={{
-//                     display: 'inline-block',
-//                     width: 3,
-//                     height: 14,
-//                     background: 'var(--green)',
-//                     boxShadow: '0 0 6px var(--green)',
-//                     borderRadius: 1,
-//                   }}
-//                 />
-//               ))}
-//               <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8, letterSpacing: 1 }}>
-//                 processing...
-//               </span>
-//             </div>
-//           </motion.div>
-//         )}
-//         <div ref={bottomRef} />
-//       </div>
-
-//       {/* Input */}
-//       <div style={{
-//         padding: '16px 28px 20px',
-//         borderTop: '1px solid var(--border)',
-//         background: 'rgba(0,10,0,0.9)',
-//         flexShrink: 0,
-//       }}>
-//         <form onSubmit={handleSendMessage}>
-//           <div style={{
-//             display: 'flex',
-//             alignItems: 'flex-end',
-//             border: '1px solid var(--border-active)',
-//             borderRadius: 4,
-//             background: 'rgba(0,255,65,0.03)',
-//             padding: '12px 14px',
-//             gap: 12,
-//             boxShadow: '0 0 20px rgba(0,255,65,0.05)',
-//             transition: 'box-shadow 0.2s',
-//           }}>
-//             <span style={{ color: 'var(--green-dim)', fontSize: 13, paddingBottom: 1, flexShrink: 0 }}>▶</span>
-//             <textarea
-//               rows={1}
-//               value={input}
-//               onChange={(e) => setInput(e.target.value)}
-//               onKeyDown={(e) => {
-//                 if (e.key === 'Enter' && !e.shiftKey) {
-//                   e.preventDefault();
-//                   handleSendMessage(e);
-//                 }
-//               }}
-//               placeholder="paste an issue URL or query the codebase..."
-//               className="terminal-input"
-//               style={{ fontSize: 13, lineHeight: 1.5, paddingBottom: 0, flex: 1 }}
-//             />
-//             <button
-//               type="submit"
-//               disabled={!input.trim() || isTyping}
-//               style={{
-//                 background: input.trim() && !isTyping ? 'var(--green)' : 'transparent',
-//                 border: '1px solid ' + (input.trim() && !isTyping ? 'var(--green)' : 'var(--border)'),
-//                 borderRadius: 3,
-//                 width: 34,
-//                 height: 34,
-//                 display: 'flex',
-//                 alignItems: 'center',
-//                 justifyContent: 'center',
-//                 cursor: input.trim() && !isTyping ? 'pointer' : 'not-allowed',
-//                 flexShrink: 0,
-//                 transition: 'all 0.2s',
-//                 boxShadow: input.trim() && !isTyping ? '0 0 14px var(--green-muted)' : 'none',
-//               }}
-//             >
-//               <Send size={15} color={input.trim() && !isTyping ? '#000' : 'var(--text-muted)'} strokeWidth={2.5} />
-//             </button>
-//           </div>
-//           <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-muted)', letterSpacing: 0.5, paddingLeft: 2 }}>
-//             ENTER to send · SHIFT+ENTER for newline · paste issue URL for deep analysis
-//           </div>
-//         </form>
-//       </div>
-//     </motion.div>
-//   );

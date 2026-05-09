@@ -55,6 +55,10 @@ Settings.llm = Ollama(
     base_url="http://localhost:11434",
     request_timeout=300.0,
     context_window=16384,
+    temperature=0.1,
+    additional_kwargs={
+        "repeat-penalty": 1.15
+    }
 )
 
 _IGNORE_DIRS: frozenset[str] = frozenset({
@@ -1013,6 +1017,8 @@ def run_repo_qa(engine_bundle: dict, question: str) -> dict:
     prompt = f"""You are an expert AI mentor helping a developer understand a codebase.
 Answer the question using ONLY the source code provided. Do not reference files not listed below.
 If the answer cannot be found in the context, say so clearly.
+
+CRITICAL INSTRUCTION: Be concise and distinct. Do NOT repeat the same bullet point, sentence, or concept multiple times. Once a point is made, move on.
 
 Files you may reference:
 {valid_paths}
