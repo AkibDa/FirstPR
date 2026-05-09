@@ -307,6 +307,20 @@ function IssueAnalysisCard({ data }) {
           </div>
         )}
 
+        {/* Low Confidence Warning (New Feature!) */}
+        {reasoning.localisation_confidence?.low_confidence && (
+          <div style={{ 
+            display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10,
+            background: "rgba(200,60,60,0.1)", border: "1px solid rgba(200,60,60,0.3)", 
+            padding: "10px 14px", borderRadius: 3 
+          }}>
+            <AlertTriangle size={14} color="#c83c3c" style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ color: "#c83c3c", fontSize: 11, lineHeight: 1.5 }}>
+              <strong style={{ letterSpacing: 1 }}>LOW CONFIDENCE:</strong> {reasoning.localisation_confidence.explanation}
+            </span>
+          </div>
+        )}
+
         {/* Patch (Fixed!) */}
         {reasoning.suggested_patch && reasoning.suggested_patch.diff && (
           <Accordion 
@@ -327,6 +341,7 @@ function IssueAnalysisCard({ data }) {
     </div>
   );
 }
+
       
 
 function QAAnswerCard({ data }) {
