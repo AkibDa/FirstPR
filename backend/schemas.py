@@ -8,21 +8,42 @@ class RepoQARequest(BaseModel):
     repo_url: str
     question: str
 
+
 class AnalyzeRequest(BaseModel):
-    repo_url: str
+  repo_url: str
 
-    issue_text: Optional[str] = None
-    issue_title: Optional[str] = ""
+  issue_text: Optional[str] = None
+  issue_title: Optional[str] = None
 
-    issue_url: Optional[str] = None
+  issue_url: Optional[str] = None
 
-    @model_validator(mode="after")
-    def require_issue_source(self) -> "AnalyzeRequest":
-        if not self.issue_text and not self.issue_url:
-            raise ValueError(
-                "Provide either 'issue_text' or 'issue_url' (a GitHub issue URL)."
-            )
-        return self
+  @model_validator(mode="after")
+  def require_issue_source(self) -> "AnalyzeRequest":
+    has_issue_url = bool(
+      self.issue_url and self.issue_url.strip()
+    )
+
+    has_issue_text = bool(
+      self.issue_text and self.issue_text.strip()
+    )
+
+    has_issue_title = bool(
+      self.issue_title and self.issue_title.strip()
+    )
+
+    if not (
+        has_issue_url or
+        has_issue_text or
+        has_issue_title
+    ):
+      raise ValueError(
+        "Provide either "
+        "'issue_text', "
+        "'issue_title', "
+        "or 'issue_url'."
+      )
+
+    return self
 
 class RelevantFile(BaseModel):
     path: str
@@ -69,4 +90,3 @@ class CodeExplanation(BaseModel):
         default=None,
         description="Optional unified diff with a concrete code fix.",
     )
-    

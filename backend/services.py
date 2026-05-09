@@ -189,10 +189,253 @@ MODEL_KEYWORDS = [
 ]
 
 # Hard limit: never embed more than this many files per repo
-_MAX_EMBED_FILES = 300
+_MAX_EMBED_FILES = 1200
 # Hard limit: files larger than this char count are chunked more aggressively
 _LARGE_FILE_THRESHOLD = 8_000
 
+ARCHITECTURE_KEYWORDS = {
+    "stream": ["stream", "streaming", "async", "generator"],
+    "retry": ["retry", "backoff", "resilience"],
+    "middleware": ["middleware", "hook", "wrapper"],
+    "auth": ["auth", "token", "oauth", "permission"],
+    "runtime": ["runtime", "executor", "runner"],
+    "config": ["config", "setting", "env"],
+}
+
+ROLE_HINTS = {
+    "retry": ["service", "client"],
+    "stream": ["runtime", "service"],
+    "auth": ["middleware", "service"],
+    "config": ["config"],
+}
+
+def build_retrieval_plan(issue_text: str) -> dict:
+    """
+    Convert issue text into structured retrieval intent.
+    """
+
+    entities = extract_issue_entities(issue_text)
+
+    symbols = []
+    modules = []
+    filepaths = []
+
+    for e in entities:
+        if e.kind == "symbol" and e.confidence >= 0.60:
+            symbols.append(e.text)
+
+        elif e.kind == "module" and e.confidence >= 0.60:
+            modules.append(e.text)
+
+        elif e.kind == "filepath" and e.confidence >= 0.70:
+            filepaths.append(e.text)
+
+    text_lower = issue_text.lower()
+
+    operations = []
+
+    for op, kws in ARCHITECTURE_KEYWORDS.items():
+        if any(kw in text_lower for kw in kws):
+            operations.append(op)
+
+    role_hints = []
+
+    for op in operations:
+        role_hints.extend(ROLE_HINTS.get(op, []))
+
+    return {
+        "symbols": list(dict.fromkeys(symbols)),
+        "modules": list(dict.fromkeys(modules)),
+        "filepaths": list(dict.fromkeys(filepaths)),
+        "operations": list(dict.fromkeys(operations)),
+        "role_hints": list(dict.fromkeys(role_hints)),
+    }
+
+
+def symbol_retrieval(
+    sources: Dict[str, str],
+    symbols: List[str],
+) -> Dict[str, float]:
+  """
+  Direct symbol-based retrieval.
+
+  MUCH stronger than semantic similarity
+  for engineering issues.
+  """
+
+  results = {}
+
+  if not symbols:
+    return results
+
+  for fp, src in sources.items():
+
+    score = 0.0
+
+    extracted = extract_symbols(src)
+
+    file_symbols = (
+        extracted["functions"] +
+        extracted["classes"]
+    )
+
+    for sym in symbols:
+
+      if sym in file_symbols:
+        score += 5.0
+
+      elif re.search(rf"\b{re.escape(sym)}\b", src):
+        score += 2.0
+
+    if score > 0:
+      results[fp] = score
+
+  return results
+
+def role_based_retrieval(
+    sources: Dict[str, str],
+    role_hints: List[str],
+) -> Dict[str, float]:
+
+  results = {}
+
+  if not role_hints:
+    return results
+
+  for fp, src in sources.items():
+
+    role = classify_file_role(fp, src)
+
+    if role in role_hints:
+      results[fp] = 2.0
+
+  return results
+
+def expand_dependency_neighbors(
+    initial_files: List[str],
+    sources: Dict[str, str],
+    max_neighbors: int = 10,
+) -> Dict[str, float]:
+
+  expanded = {}
+
+  for fp in initial_files:
+
+    deps = build_dependency_chain(
+      fp,
+      sources,
+      max_depth=2,
+    )
+
+    for edge in deps:
+
+      parts = [p.strip() for p in edge.split("→")]
+
+      for p in parts:
+
+        if p != fp and p in sources:
+          expanded[p] = 1.5
+
+  return expanded
+
+def build_weighted_query_terms(
+    issue_text: str,
+    plan: dict,
+) -> List[str]:
+
+  generic = re.findall(
+    r"[a-zA-Z_]\w+",
+    issue_text.lower()
+  )
+
+  weighted = []
+
+  # Generic terms
+  weighted.extend(generic)
+
+  # Symbols are VERY important
+  for sym in plan["symbols"]:
+    weighted.extend([sym.lower()] * 5)
+
+  # Operations are important
+  for op in plan["operations"]:
+    weighted.extend([op] * 3)
+
+  # Modules are important
+  for mod in plan["modules"]:
+    weighted.extend([mod.lower()] * 4)
+
+  return weighted
+
+def filepath_signal_score(
+    filepath: str,
+    plan: dict,
+) -> float:
+
+  fp = filepath.lower()
+
+  score = 0.0
+
+  for sym in plan["symbols"]:
+    if sym.lower() in fp:
+      score += 4.0
+
+  for op in plan["operations"]:
+    if op.lower() in fp:
+      score += 2.5
+
+  for mod in plan["modules"]:
+    if mod.lower() in fp:
+      score += 3.0
+
+  return score
+
+def expand_issue_query(issue_text: str) -> str:
+  """
+  Expand vague engineering issues into retrieval-friendly queries.
+  """
+
+  text = issue_text.lower()
+
+  expansions = []
+
+  if "auth" in text:
+    expansions.extend([
+      "authentication middleware",
+      "oauth token validation",
+      "security dependency",
+      "request authentication flow",
+    ])
+
+  if "stream" in text:
+    expansions.extend([
+      "streaming response",
+      "async generator",
+      "stream response handling",
+    ])
+
+  if "retry" in text:
+    expansions.extend([
+      "retry logic",
+      "backoff strategy",
+      "request retry wrapper",
+    ])
+
+  if "middleware" in text:
+    expansions.extend([
+      "request middleware",
+      "response middleware",
+    ])
+
+  if "dependency" in text:
+    expansions.extend([
+      "dependency injection",
+      "dependency resolver",
+    ])
+
+  expanded = issue_text + "\n" + "\n".join(expansions)
+
+  return expanded
 
 def _should_skip_file(file_path: str) -> bool:
     """
@@ -228,6 +471,18 @@ def _file_priority(file_path: str) -> int:
     Core source files get 0-1, utility/schema files get 2, test-adjacent or
     config files that slipped through filtering get 3.
     """
+    HIGH_SIGNAL_DIRS = [
+      "security",
+      "auth",
+      "oauth",
+      "dependency",
+      "dependencies",
+      "middleware",
+      "routing",
+      "openapi",
+      "params",
+    ]
+
     fp_lower = file_path.lower().replace("\\", "/")
     parts = fp_lower.split("/")
 
@@ -241,6 +496,8 @@ def _file_priority(file_path: str) -> int:
         return 1
     if any(hint in stem for hint in ("config", "setting")):
         return 2
+    if any(seg in stem for seg in HIGH_SIGNAL_DIRS):
+      return -2
 
     return 3
 
@@ -463,188 +720,352 @@ Return a JSON object with exactly these keys:
         logger.warning(f"Issue analysis failed: {exc}")
         return {}
 
+
 def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
-    """
-    Hybrid retrieval → issue-aware reranking pipeline.
+  """
+  Production-grade hybrid retrieval pipeline.
 
-    Stage 1 — Recall:  cast a wide net with both semantic (top-12) and BM25
-                        (top-12, threshold lowered to 0.5 so more candidates
-                        reach the reranker rather than being lost early).
-    Stage 2 — Rerank:  ``reranker.rerank()`` scores candidates on five
-                        independent signals (symbol match, filepath domain,
-                        dependency proximity, retrieval agreement, penalty)
-                        and partitions results into HIGH/MEDIUM/LOW/PENALISED
-                        confidence tiers.
-    Stage 3 — Return:  only non-PENALISED files are surfaced (up to 6).
-                        The reranker's ``RerankerResult`` metadata is threaded
-                        through so the reasoning agent can see confidence tiers.
-    """
-    vector_index:    VectorStoreIndex    = engine_bundle["vector_index"]
-    bm25:            Optional[BM25Okapi] = engine_bundle["bm25"]
-    bm25_nodes:      list                = engine_bundle["bm25_nodes"]
-    sources:         Dict[str, str]      = engine_bundle["sources"]
+  Improvements:
+  - Retrieval fusion BEFORE reranking
+  - Strong filepath boosting
+  - Symbol-aware ranking
+  - Better BM25 weighting
+  - Dependency expansion only after low confidence
+  - Cleaner confidence handling
+  """
 
-    candidates: Dict[str, Tuple[float, str]] = {}
+  vector_index: VectorStoreIndex = engine_bundle["vector_index"]
+  bm25: Optional[BM25Okapi] = engine_bundle["bm25"]
+  bm25_nodes: list = engine_bundle["bm25_nodes"]
+  sources: Dict[str, str] = engine_bundle["sources"]
 
-    # --- Stage 1a: Semantic retrieval (wider net for reranker) ---
-    try:
-        retriever = vector_index.as_retriever(similarity_top_k=25)
-        nodes: List[NodeWithScore] = retriever.retrieve(issue_full)
-        for node in nodes:
-            fp    = node.metadata.get("file_path", "")
-            score = node.score or 0.0
-            if fp and (fp not in candidates or score > candidates[fp][0]):
-                candidates[fp] = (score, "semantic")
-    except Exception as exc:
-        logger.warning(f"Vector retrieval failed: {exc}")
+  plan = build_retrieval_plan(issue_full)
 
-    # --- Stage 1b: BM25 retrieval ---
-    if bm25 and bm25_nodes:
-        query_tokens = re.findall(r"[a-zA-Z_]\w*", issue_full)
-        bm25_scores  = bm25.get_scores(query_tokens)
-        top_k        = min(12, len(bm25_scores))
-        top_indices  = sorted(
-            range(len(bm25_scores)),
-            key=lambda i: bm25_scores[i],
-            reverse=True,
-        )[:top_k]
-        for idx in top_indices:
-            score = float(bm25_scores[idx])
-            if score < 0.5:
-                continue
-            fp = bm25_nodes[idx]["file_path"]
-            if fp not in candidates:
-                candidates[fp] = (score, "bm25")
+  expanded_issue = expand_issue_query(issue_full)
 
-    if not candidates:
-        return {"relevant_files": [], "key_functions": [], "search_keywords": [],
-                "reranker": None}
+  logger.info(
+    f"Retrieval plan | "
+    f"symbols={plan['symbols']} | "
+    f"operations={plan['operations']} | "
+    f"roles={plan['role_hints']}"
+  )
 
-    # --- Stage 2: Issue-aware reranking ---
-    reranker_result = rerank(
-        candidates  = candidates,
-        sources     = sources,
-        issue_full  = issue_full,
-        top_k       = 6,
+  candidates: Dict[str, Tuple[float, str]] = {}
+
+  # =========================================================
+  # 1. SEMANTIC RETRIEVAL
+  # =========================================================
+
+  try:
+    retriever = vector_index.as_retriever(similarity_top_k=30)
+
+    nodes: List[NodeWithScore] = retriever.retrieve(expanded_issue)
+
+    for node in nodes:
+      fp = node.metadata.get("file_path", "")
+
+      if not fp:
+        continue
+
+      score = float(node.score or 0)
+
+      semantic_score = score * 4.0
+
+      if (
+          fp not in candidates or
+          semantic_score > candidates[fp][0]
+      ):
+        candidates[fp] = (
+          semantic_score,
+          "semantic"
+        )
+
+  except Exception as exc:
+    logger.warning(f"Vector retrieval failed: {exc}")
+
+  # =========================================================
+  # 2. BM25 RETRIEVAL
+  # =========================================================
+
+  if bm25 and bm25_nodes:
+
+    query_tokens = build_weighted_query_terms(
+      expanded_issue,
+      plan,
     )
 
-    if reranker_result.low_confidence:
-      logger.warning(
-        "Low-confidence retrieval detected — using fallback semantic ranking"
+    bm25_scores = bm25.get_scores(query_tokens)
+
+    top_k = min(25, len(bm25_scores))
+
+    top_indices = sorted(
+      range(len(bm25_scores)),
+      key=lambda i: bm25_scores[i],
+      reverse=True,
+    )[:top_k]
+
+    for idx in top_indices:
+
+      raw_score = float(bm25_scores[idx])
+
+      if raw_score < 1.0:
+        continue
+
+      fp = bm25_nodes[idx]["file_path"]
+
+      bm25_score = raw_score * 1.5
+
+      if fp in candidates:
+
+        old_score, old_method = candidates[fp]
+
+        candidates[fp] = (
+          old_score + bm25_score,
+          f"{old_method}+bm25"
+        )
+
+      else:
+        candidates[fp] = (
+          bm25_score,
+          "bm25"
+        )
+
+  # =========================================================
+  # 3. SYMBOL RETRIEVAL
+  # =========================================================
+
+  symbol_hits = symbol_retrieval(
+    sources,
+    plan["symbols"],
+  )
+
+  for fp, score in symbol_hits.items():
+
+    boosted = score * 4.0
+
+    if fp in candidates:
+
+      old_score, old_method = candidates[fp]
+
+      candidates[fp] = (
+        old_score + boosted,
+        f"{old_method}+symbol"
       )
 
-      fallback_candidates = sorted(
-        candidates.items(),
-        key=lambda x: x[1][0],
-        reverse=True,
-      )[:6]
+    else:
 
-      relevant_files = []
+      candidates[fp] = (
+        boosted,
+        "symbol"
+      )
 
-      for fp, (score, method) in fallback_candidates:
-        relevant_files.append({
-          "path": fp,
-          "relevance": "medium",
-          "score": score,
-          "method": method,
-          "reason": "Fallback semantic retrieval",
-          "functions": [],
-          "classes": [],
-          "role": "unknown",
-          "signals": {
-            "symbol": 0,
-            "filepath": 0,
-            "dep": 0,
-            "agreement": 0,
-            "penalty": 0,
-          },
-          "matched_symbols": [],
-        })
+  # =========================================================
+  # 4. ROLE RETRIEVAL
+  # =========================================================
 
-      return {
-        "relevant_files": relevant_files,
-        "key_functions": [],
-        "search_keywords": [],
-        "most_likely_fix_zone": None,
-        "reranker": {
-          "confidence_tier": "LOW",
-          "overall_confidence": 0.0,
-          "anchor_file": None,
-          "low_confidence": True,
-          "explanation": "Fallback semantic retrieval used",
-        },
-      }
+  role_hits = role_based_retrieval(
+    sources,
+    plan["role_hints"],
+  )
 
-    logger.info(
-        f"Reranker: {len(candidates)} candidates → "
-        f"{len(reranker_result.ranked_files)} after reranking | "
-        f"top_tier={reranker_result.confidence_tier} | "
-        f"anchor={reranker_result.anchor_file} | "
-        f"low_conf={reranker_result.low_confidence}"
+  for fp, score in role_hits.items():
+
+    if fp in candidates:
+
+      old_score, old_method = candidates[fp]
+
+      candidates[fp] = (
+        old_score + score,
+        f"{old_method}+role"
+      )
+
+    else:
+
+      candidates[fp] = (
+        score,
+        "role"
+      )
+
+  # =========================================================
+  # 5. FILEPATH BOOSTING
+  # =========================================================
+
+  for fp in list(candidates.keys()):
+
+    boost = filepath_signal_score(
+      fp,
+      plan,
     )
 
-    # --- Stage 3: Build the response payload ---
-    relevant_files = []
-    for r in reranker_result.ranked_files:
-        relevant_files.append({
-            "path":             r.path,
-            "relevance":        r.confidence_tier.lower(),   # high/medium/low
-            "score":            r.composite_score,
-            "retrieval_score":  round(r.retrieval_score, 3),
-            "method":           r.retrieval_method,
-            "reason":           r.reason,
-            "functions":        r.functions,
-            "classes":          r.classes,
-            "role":             r.role,
-            "signals": {
-                "symbol":    r.symbol_score,
-                "filepath":  r.filepath_score,
-                "dep":       r.dep_score,
-                "agreement": r.agreement_score,
-                "penalty":   r.penalty,
-            },
-            "matched_symbols": r.matched_symbols,
-        })
+    if boost > 0:
+      old_score, old_method = candidates[fp]
 
-    fix_zone = None
-    if relevant_files:
-        top = relevant_files[0]
-        fix_zone = {
-            "file_path":            top.get("path"),
-            "role":                 top.get("role"),
-            "localisation_tier":    reranker_result.confidence_tier,
-            "localisation_score":   round(reranker_result.overall_confidence, 3),
-            "matched_symbols":      top.get("matched_symbols", [])[:8],
-            "likely_functions":     (top.get("functions") or [])[:8],
-            "likely_classes":       (top.get("classes") or [])[:8],
-            "reason":               top.get("reason"),
-        }
+      candidates[fp] = (
+        old_score + boost,
+        f"{old_method}+filepath"
+      )
 
-    entities = extract_issue_entities(issue_full)
-    keywords = []
-    seen = set()
-    for e in entities:
-        if e.kind in ("symbol", "error_type", "module") and e.confidence >= 0.55:
-            if e.text not in seen:
-                keywords.append(e.text)
-                seen.add(e.text)
-        if len(keywords) >= 10:
-            break
+  # =========================================================
+  # 6. PRE-RERANK FILTERING
+  # =========================================================
 
-    return {
-        "relevant_files":  relevant_files,
-        "key_functions":   list({fn for f in relevant_files for fn in f["functions"]})[:10],
-        "search_keywords": keywords,
-        "most_likely_fix_zone": fix_zone,
-        # Reranker metadata surfaced to API consumers and the reasoning agent
-        "reranker": {
-            "confidence_tier":    reranker_result.confidence_tier,
-            "overall_confidence": round(reranker_result.overall_confidence, 3),
-            "anchor_file":        reranker_result.anchor_file,
-            "low_confidence":     reranker_result.low_confidence,
-            "explanation":        reranker_result.explanation,
-        },
+  sorted_candidates = sorted(
+    candidates.items(),
+    key=lambda x: x[1][0],
+    reverse=True,
+  )
+
+  candidates = dict(sorted_candidates[:40])
+
+  # =========================================================
+  # 7. RERANK
+  # =========================================================
+
+  reranker_result = rerank(
+    candidates=candidates,
+    sources=sources,
+    issue_full=expanded_issue,
+    top_k=6,
+  )
+
+  # =========================================================
+  # 8. LOW CONFIDENCE EXPANSION
+  # =========================================================
+
+  if reranker_result.low_confidence:
+
+    logger.warning(
+      "Low-confidence retrieval detected — expanding dependency graph"
+    )
+
+    seed_files = [
+      r.path
+      for r in reranker_result.ranked_files[:3]
+    ]
+
+    expanded = expand_dependency_neighbors(
+      seed_files,
+      sources,
+    )
+
+    for fp, score in expanded.items():
+
+      if fp in candidates:
+
+        old_score, old_method = candidates[fp]
+
+        candidates[fp] = (
+          old_score + score,
+          f"{old_method}+dependency"
+        )
+
+      else:
+
+        candidates[fp] = (
+          score,
+          "dependency"
+        )
+
+    reranker_result = rerank(
+      candidates=candidates,
+      sources=sources,
+      issue_full=expanded_issue,
+      top_k=6,
+    )
+
+  logger.info(
+    f"Reranker: {len(candidates)} candidates → "
+    f"{len(reranker_result.ranked_files)} after reranking | "
+    f"top_tier={reranker_result.confidence_tier} | "
+    f"anchor={reranker_result.anchor_file} | "
+    f"low_conf={reranker_result.low_confidence}"
+  )
+
+  # =========================================================
+  # 9. RESPONSE
+  # =========================================================
+
+  relevant_files = []
+
+  for r in reranker_result.ranked_files:
+    relevant_files.append({
+      "path": r.path,
+      "relevance": r.confidence_tier.lower(),
+      "score": r.composite_score,
+      "retrieval_score": round(r.retrieval_score, 3),
+      "method": r.retrieval_method,
+      "reason": r.reason,
+      "functions": r.functions,
+      "classes": r.classes,
+      "role": r.role,
+      "signals": {
+        "symbol": r.symbol_score,
+        "filepath": r.filepath_score,
+        "dep": r.dep_score,
+        "agreement": r.agreement_score,
+        "penalty": r.penalty,
+      },
+      "matched_symbols": r.matched_symbols,
+    })
+
+  fix_zone = None
+
+  if relevant_files:
+    top = relevant_files[0]
+
+    fix_zone = {
+      "file_path": top.get("path"),
+      "role": top.get("role"),
+      "localisation_tier": reranker_result.confidence_tier,
+      "localisation_score": round(
+        reranker_result.overall_confidence,
+        3
+      ),
+      "matched_symbols": top.get("matched_symbols", [])[:8],
+      "likely_functions": (top.get("functions") or [])[:8],
+      "likely_classes": (top.get("classes") or [])[:8],
+      "reason": top.get("reason"),
     }
+
+  entities = extract_issue_entities(expanded_issue)
+
+  keywords = []
+  seen = set()
+
+  for e in entities:
+
+    if (
+        e.kind in ("symbol", "error_type", "module")
+        and e.confidence >= 0.55
+    ):
+
+      if e.text not in seen:
+        keywords.append(e.text)
+        seen.add(e.text)
+
+    if len(keywords) >= 10:
+      break
+
+  return {
+    "relevant_files": relevant_files,
+    "key_functions": list({
+      fn
+      for f in relevant_files
+      for fn in f["functions"]
+    })[:10],
+    "search_keywords": keywords,
+    "most_likely_fix_zone": fix_zone,
+    "reranker": {
+      "confidence_tier": reranker_result.confidence_tier,
+      "overall_confidence": round(
+        reranker_result.overall_confidence,
+        3
+      ),
+      "anchor_file": reranker_result.anchor_file,
+      "low_confidence": reranker_result.low_confidence,
+      "explanation": reranker_result.explanation,
+    },
+  }
 
 def _build_code_context(
     retrieved_files: List[str],
@@ -739,9 +1160,18 @@ def _filter_list_of_strings_by_paths(items: list, valid_path_set: set) -> list:
         if not isinstance(it, str):
             cleaned.append(it)
             continue
-        p = _extract_first_path_token(it)
-        if not p or p in valid_path_set:
+        stripped = it.strip()
+        if re.match(r"^(step|phase)\s+\d+", stripped.lower()):
+          cleaned.append(it)
+          continue
+
+        p = _extract_first_path_token(stripped)
+        if not p:
             cleaned.append(it)
+            continue
+        if p in valid_path_set:
+            cleaned.append(it)
+            continue
         else:
             logger.warning(f"Stripped hallucinated path from list item: {p!r}")
     return cleaned
@@ -1073,7 +1503,8 @@ Start your "explanation" with exactly: {uncertainty_note}
         return result
 
     try:
-        resp   = str(Settings.llm.complete(prompt))
+        response_format = {"type": "json_object"}
+        resp   = str(Settings.llm.complete(prompt, response_format=response_format))
         result = extract_json(resp)
 
         if not result:

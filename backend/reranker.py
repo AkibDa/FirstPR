@@ -10,11 +10,11 @@ from issue_parser import extract_issue_entities
 
 logger = logging.getLogger(__name__)
 
-_W_SYMBOL     = 0.35   # strongest signal: name mentioned in issue ↔ file
-_W_FILEPATH   = 0.25   # second: path semantics match issue domain
-_W_DEP        = 0.15   # third: dependency proximity to anchor file
-_W_AGREEMENT  = 0.15   # fourth: both retrieval methods agree
-_W_RETRIEVAL  = 0.10   # base retrieval score (normalised), tie-breaker
+_W_SYMBOL     = 0.20
+_W_FILEPATH   = 0.20
+_W_DEP        = 0.10
+_W_AGREEMENT  = 0.05
+_W_RETRIEVAL  = 0.45
 
 assert abs(_W_SYMBOL + _W_FILEPATH + _W_DEP + _W_AGREEMENT + _W_RETRIEVAL - 1.0) < 1e-9
 
@@ -69,6 +69,8 @@ _FILEPATH_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
     "client":      ["client", "http", "request", "fetch", "conn", "socket"],
     "test":        ["test", "spec", "mock", "fixture", "stub"],
     "util":        ["util", "helper", "common", "shared", "misc"],
+    "security":    ["security", "oauth", "scope", "scopes", "jwt", "token", "bearer", "apikey", "openid",],
+    "dependency":  ["dependency", "dependencies", "depends", "inject", "injection",],
 }
 
 # Flatten to a lookup: keyword → domain
@@ -232,7 +234,23 @@ def _filepath_score(
         return 0.0, []
 
     # Each distinct domain hit adds 0.4, capped at 1.0
-    score = min(1.0, 0.4 * len(matched_domains))
+    score = min(1.0, 0.35 * len(matched_domains))
+
+    # Strong boost for runtime security/dependency files
+    HIGH_SIGNAL_SEGMENTS = {
+      "security",
+      "oauth",
+      "dependency",
+      "dependencies",
+      "auth",
+      "scope",
+      "scopes",
+    }
+
+    if any(seg in segment_set for seg in HIGH_SIGNAL_SEGMENTS):
+      score += 0.35
+
+    score = min(score, 1.0)
     return round(score, 3), matched_domains
 
 
@@ -318,6 +336,13 @@ def _penalty_score(
     if _PENALTY_WAIVE_IF_NAMED and file_stem and re.search(rf"\b{re.escape(file_stem)}\b", issue_full, re.IGNORECASE):
         return 0.0
 
+    if (
+        fp_lower.startswith("docs")
+        or "tutorial" in fp_lower
+        or "example" in fp_lower
+    ):
+      return 0.35
+
     return _PENALTY_AMOUNT
 
 
@@ -337,7 +362,12 @@ def _composite(
         _W_AGREEMENT * agr +
         _W_RETRIEVAL * ret
     )
-    return max(0.0, round(raw - penalty, 4))
+    score = max(0.0, raw - penalty)
+
+    if ret >= 0.70:
+      score = max(score, 0.45)
+
+    return round(min(score, 1.0), 4)
 
 
 def _assign_tier(composite: float) -> str:
@@ -420,8 +450,17 @@ def rerank(
     issue_domain_kws  = _extract_issue_domain_keywords(issue_full)
 
     # Separate retrieval method sets for agreement scoring
-    semantic_hits: Set[str] = {fp for fp, (_, m) in candidates.items() if m == "semantic"}
-    bm25_hits:     Set[str] = {fp for fp, (_, m) in candidates.items() if m == "bm25"}
+    semantic_hits: Set[str] = {
+      fp for fp, (_, m)
+      in candidates.items()
+      if m in ("semantic", "dependency")
+    }
+
+    bm25_hits: Set[str] = {
+      fp for fp, (_, m)
+      in candidates.items()
+      if m in ("bm25", "symbol", "role")
+    }
 
     # Normalise raw retrieval scores to [0, 1] relative to this candidate set
     max_raw = max((s for s, _ in candidates.values()), default=1.0) or 1.0
@@ -463,7 +502,13 @@ def rerank(
         dep_s, dep_path      = _dependency_score(fp, anchor_file, sources, all_dep_chains)
         agr_s                = _agreement_score(fp, semantic_hits, bm25_hits)
         pen                  = _penalty_score(fp, issue_full)
-        ret_s                = raw / max_raw
+        ret_s = min(raw / max_raw, 1.0)
+
+        # Extra boost for hybrid retrieval
+        if "bm25" in method and fp_s > 0:
+          ret_s += 0.15
+
+        ret_s = min(ret_s, 1.0)
 
         comp = _composite(sym_s, fp_s, dep_s, agr_s, ret_s, pen)
         tier = _assign_tier(comp)

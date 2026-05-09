@@ -210,27 +210,106 @@ async def analyze_issue(
     tree          = entry["tree"]
     sources: dict = engine_bundle["sources"]
 
-    issue_title = req.issue_title or ""
-    issue_text  = req.issue_text  or ""
+    issue_title = (
+      (req.issue_title or "")
+      .strip()
+    )
 
+    issue_text = (
+      (req.issue_text or "")
+      .strip()
+    )
     if req.issue_url:
-        try:
-            fetched     = await fetch_github_issue(req.issue_url)
-            issue_title = fetched["title"]
-            issue_text  = fetched["body"]
-            labels_str  = ", ".join(fetched.get("labels", []))
-            if labels_str:
-                issue_text += f"\n\nLabels: {labels_str}"
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        except Exception as exc:
-            logger.error(f"GitHub issue fetch failed: {exc}")
-            raise HTTPException(502, f"Could not fetch GitHub issue: {exc}")
 
-    issue_full = f"Title: {issue_title}\n\n{issue_text}" if issue_title else issue_text
+      try:
 
-    if not issue_full.strip():
-        raise HTTPException(400, "Issue body is empty.")
+        fetched = await fetch_github_issue(
+          req.issue_url
+        )
+
+        issue_title = (
+            fetched.get("title") or ""
+        ).strip()
+
+        issue_text = (
+            fetched.get("body") or ""
+        ).strip()
+
+        labels_str = ", ".join(
+          fetched.get("labels", [])
+        )
+
+        if labels_str:
+          issue_text += (
+            f"\n\nLabels: {labels_str}"
+          )
+
+      except ValueError as exc:
+
+        raise HTTPException(
+          400,
+          str(exc)
+        )
+
+      except Exception as exc:
+
+        logger.error(
+          f"GitHub issue fetch failed: {exc}"
+        )
+
+        raise HTTPException(
+          502,
+          f"Could not fetch GitHub issue: {exc}"
+        )
+
+    # =========================================================
+    # Validation
+    # =========================================================
+
+    if not any([
+      issue_title,
+      issue_text,
+      req.issue_url,
+    ]):
+      raise HTTPException(
+        status_code=422,
+        detail=(
+          "Provide either:\n"
+          "- issue_title\n"
+          "- issue_text\n"
+          "- issue_url"
+        )
+      )
+
+    # =========================================================
+    # Build Retrieval Query
+    # =========================================================
+
+    issue_parts = []
+
+    if issue_title:
+      issue_parts.append(
+        f"Title: {issue_title}"
+      )
+
+    if issue_text:
+      issue_parts.append(issue_text)
+
+    issue_full = "\n\n".join(issue_parts).strip()
+
+    meaningful_tokens = re.findall(
+      r"[a-zA-Z_]{3,}",
+      issue_full
+    )
+
+    if len(meaningful_tokens) < 4:
+      raise HTTPException(
+        status_code=422,
+        detail=(
+          "Issue description is too short. "
+          "Please provide more context."
+        )
+      )
 
     repo_name = get_repo_name(req.repo_url)
 
@@ -259,8 +338,12 @@ async def analyze_issue(
         return {
             "repo_name": repo_name,
             "issue": {
-                "title":  issue_title,
-                "source": req.issue_url or "manual",
+            "title": (
+                issue_title
+                or issue_text[:120]
+                or "Untitled Issue"
+            ),
+            "source": req.issue_url or "manual",
             },
             "analysis":  analysis,
             "retrieval": retrieval,
