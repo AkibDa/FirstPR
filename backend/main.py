@@ -1,24 +1,38 @@
-import logging
-
 import asyncio
 import sys
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from config import configure_logging, settings
 from api import router
 
-logging.basicConfig(level=logging.INFO)
+# Configure structured logging before anything else
+configure_logging()
+
+import logging
+logger = logging.getLogger(__name__)
+
+# Validate required env vars for the current mode — raises on misconfiguration
+settings.validate()
+
+logger.info(
+    "Starting FirstPR  env=%s  llm=%s  embed=%s",
+    settings.app_env,
+    settings.llm_model,
+    settings.embed_model,
+)
 
 app = FastAPI(
     title="FirstPR",
     description=(
-        "AI-powered multi-agent mentorship system for beginner open-source contributors. "
-        "Ingests any GitHub repository on-demand and guides contributors through issues "
-        "using a hybrid RAG pipeline backed by persistent ChromaDB vector storage."
+        "AI-powered multi-agent mentorship system for beginner open-source "
+        "contributors. Ingests any GitHub repository on-demand and guides "
+        "contributors through issues using a hybrid RAG pipeline backed by "
+        "persistent ChromaDB vector storage."
     ),
     version="2.0.0",
 )
@@ -34,6 +48,26 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to FirstPR API"}
+    return {
+        "message": "Welcome to FirstPR API",
+        "env":     settings.app_env,
+        "llm":     settings.llm_model,
+    }
+
+
+@app.get("/config")
+def show_config():
+    """Expose non-sensitive runtime config for debugging."""
+    return {
+        "app_env":          settings.app_env,
+        "llm_model":        settings.llm_model,
+        "embed_model":      settings.embed_model,
+        "llm_base_url":     settings.llm_base_url,
+        "cloud_embed_url":  settings.cloud_embed_url  if settings.is_production else "n/a (dev)",
+        "cloud_rerank_url": settings.cloud_rerank_url if settings.is_production else "n/a (dev)",
+        "chroma_path":      settings.chroma_path,
+        "embed_batch_size": settings.embed_batch_size,
+        "llm_timeout":      settings.llm_timeout,
+    }
 
 app.include_router(router)

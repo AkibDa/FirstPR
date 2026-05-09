@@ -69,3 +69,4 @@ class CodeExplanation(BaseModel):
         default=None,
         description="Optional unified diff with a concrete code fix.",
     )
+    

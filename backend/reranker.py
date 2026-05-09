@@ -48,7 +48,7 @@ _PENALTY_PATH_FRAGMENTS: Tuple[str, ...] = (
 )
 
 # Base penalty applied when a file matches any fragment above
-_PENALTY_AMOUNT = 0.25
+_PENALTY_AMOUNT = 0.10
 
 # If the issue text directly names the file stem, the penalty is waived
 _PENALTY_WAIVE_IF_NAMED = True
