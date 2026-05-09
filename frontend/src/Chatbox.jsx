@@ -42,12 +42,12 @@ function Accordion({ title, icon: Icon, children, defaultOpen = false, accent = 
         style={{
           width: "100%", display: "flex", alignItems: "center", gap: 10,
           padding: "10px 14px", background: accent ? "rgba(0,150,40,0.08)" : "rgba(0,255,65,0.03)",
-          border: "none", cursor: "pointer", color: accent ? "#00b432" : "#007a20",
+          border: "none", cursor: "pointer", color: accent ? "#00ff41" : "#02ee39",
           fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: 1,
           textAlign: "left", transition: "background 0.15s",
         }}
-        onMouseEnter={e => e.currentTarget.style.background = "rgba(0,150,40,0.12)"}
-        onMouseLeave={e => e.currentTarget.style.background = accent ? "rgba(0,150,40,0.08)" : "rgba(0,255,65,0.03)"}
+        onMouseEnter={e => e.currentTarget.style.background = "rgba(0,200,50,0.15)"}
+        onMouseLeave={e => e.currentTarget.style.background = accent ? "rgba(0,180,50,0.1)" : "rgba(0,255,65,0.05)"}
       >
         {Icon && <Icon size={13} />}
         <span style={{ flex: 1 }}>{title}</span>
@@ -65,10 +65,10 @@ function Accordion({ title, icon: Icon, children, defaultOpen = false, accent = 
 function MetaRow({ label, value, children }) {
   return (
     <div style={{ display: "flex", gap: 10, marginBottom: 7, alignItems: "flex-start" }}>
-      <span style={{ color: "#005015", fontSize: 11, minWidth: 120, letterSpacing: 0.5, flexShrink: 0 }}>
+      <span style={{ color: "#00b432", fontSize: 11, minWidth: 120, letterSpacing: 0.5, flexShrink: 0 }}>
         {label}
       </span>
-      <span style={{ color: "#009922", fontSize: 11, lineHeight: 1.5 }}>
+      <span style={{ color: "#05eb3e", fontSize: 11, lineHeight: 1.5 }}>
         {children || value}
       </span>
     </div>
@@ -96,7 +96,7 @@ function FileCard({ file }) {
         onMouseLeave={e => e.currentTarget.style.background = "rgba(0,255,65,0.02)"}
       >
         <FileCode size={12} color="#006618" />
-        <span style={{ flex: 1, color: "#009922", fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
+        <span style={{ flex: 1, color: "#04ed3e", fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
           {file.path}
         </span>
         <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
@@ -108,7 +108,7 @@ function FileCard({ file }) {
       </button>
       {open && (
         <div style={{ padding: "10px 12px", background: "rgba(0,5,1,0.8)", borderTop: "1px solid rgba(0,255,65,0.06)" }}>
-          <p style={{ color: "#007a20", fontSize: 11, lineHeight: 1.6, marginBottom: 8 }}>{file.reason}</p>
+          <p style={{ color: "#00dd33", fontSize: 11, lineHeight: 1.6, marginBottom: 8 }}>{file.reason}</p>
           {file.functions?.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
               {file.functions.map(fn => (
@@ -221,8 +221,8 @@ function IssueAnalysisCard({ data }) {
               <div style={{ fontSize: 10, color: "#005015", letterSpacing: 1, marginBottom: 6 }}>READ FIRST</div>
               {reasoning.what_to_read_first.map((item, i) => (
                 <div key={i} style={{
-                  padding: "6px 10px", borderLeft: "2px solid rgba(0,150,40,0.3)",
-                  marginBottom: 5, color: "#007a20", fontSize: 11, lineHeight: 1.5,
+                  padding: "6px 10px", borderLeft: "2px solid rgba(0,255,65,0.4)",
+                  marginBottom: 5, color: "#00dd33", fontSize: 11, lineHeight: 1.5,
                 }}>
                   {item}
                 </div>
@@ -243,8 +243,8 @@ function IssueAnalysisCard({ data }) {
                   {step.step}
                 </div>
                 <div>
-                  <div style={{ color: "#009922", fontSize: 11, fontWeight: 600, marginBottom: 3 }}>{step.title}</div>
-                  <div style={{ color: "#007a20", fontSize: 11, lineHeight: 1.5 }}>{step.description}</div>
+                  <div style={{ color: "#00ff41", fontSize: 11, fontWeight: 600, marginBottom: 3 }}>{step.title}</div>
+                  <div style={{ color: "#00dd33", fontSize: 11, lineHeight: 1.5 }}>{step.description}</div>
                   {step.files_involved?.length > 0 && (
                     <div style={{ marginTop: 5, display: "flex", gap: 5, flexWrap: "wrap" }}>
                       {step.files_involved.map(f => (
@@ -269,8 +269,8 @@ function IssueAnalysisCard({ data }) {
           <Accordion title="LOGIC TRACE" icon={BookOpen}>
             {reasoning.logic_trace.map((step, i) => (
               <div key={i} style={{
-                padding: "5px 0 5px 10px", borderLeft: "1px solid rgba(0,100,30,0.3)",
-                marginBottom: 4, color: "#006618", fontSize: 11, lineHeight: 1.5,
+                padding: "5px 0 5px 10px", borderLeft: "1px solid rgba(0,255,65,0.4)",
+                marginBottom: 4, color: "#00dd33", fontSize: 11, lineHeight: 1.5,
               }}>
                 {step}
               </div>
@@ -284,9 +284,9 @@ function IssueAnalysisCard({ data }) {
             {reasoning.common_mistakes.map((m, i) => (
               <div key={i} style={{
                 display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 5,
-                color: "#8a6000", fontSize: 11, lineHeight: 1.5,
+                color: "#cf9202", fontSize: 11, lineHeight: 1.5,
               }}>
-                <span style={{ color: "#c8a000", flexShrink: 0 }}>!</span>
+                <span style={{ color: "#daaf03", flexShrink: 0 }}>!</span>
                 {m}
               </div>
             ))}
@@ -307,7 +307,6 @@ function IssueAnalysisCard({ data }) {
           </div>
         )}
 
-        {/* Low Confidence Warning (New Feature!) */}
         {reasoning.localisation_confidence?.low_confidence && (
           <div style={{ 
             display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10,
@@ -316,7 +315,7 @@ function IssueAnalysisCard({ data }) {
           }}>
             <AlertTriangle size={14} color="#c83c3c" style={{ flexShrink: 0, marginTop: 2 }} />
             <span style={{ color: "#c83c3c", fontSize: 11, lineHeight: 1.5 }}>
-              <strong style={{ letterSpacing: 1 }}>LOW CONFIDENCE:</strong> {reasoning.localisation_confidence.explanation}
+              <strong style={{ letterSpacing: 1 }}>LOW CONFIDENCE:</strong> {retrieval.reranker?.explanation || "The AI is unsure if these are the correct files."}
             </span>
           </div>
         )}

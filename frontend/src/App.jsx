@@ -487,9 +487,13 @@ export default function App() {
               {/* Progress bar */}
               <div style={{ width: 200, height: 2, background: 'var(--border)', borderRadius: 2 }}>
                 <motion.div
-                  initial={{ width: 0 }}
-                  animate={{ width: '100%' }}
-                  transition={{ duration: 3, ease: 'easeInOut' }}
+                  animate={{ 
+                    width: 
+                      loadingStatus === 'connecting...' ? '15%' :
+                      loadingStatus === 'cloning' ? '50%' :
+                      (loadingStatus === 'done' || loadingStatus === 'cached' || loadingStatus === 'loaded') ? '100%' : '20%'
+                  }}
+                  transition={{ duration: 0.5, ease: 'easeOut' }}
                   style={{ height: '100%', background: 'var(--green)', boxShadow: '0 0 8px var(--green)', borderRadius: 2 }}
                 />
               </div>
