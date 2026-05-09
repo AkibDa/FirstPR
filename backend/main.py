@@ -6,17 +6,20 @@ if sys.platform == "win32":
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from fastapi.responses import JSONResponse
+from fastapi import Request
 
+from limiter import limiter
 from config import configure_logging, settings
 from api import router
 
-# Configure structured logging before anything else
 configure_logging()
 
 import logging
 logger = logging.getLogger(__name__)
 
-# Validate required env vars for the current mode — raises on misconfiguration
 settings.validate()
 
 logger.info(
@@ -37,6 +40,9 @@ app = FastAPI(
     version="2.0.0",
 )
 
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,9 +51,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request, exc):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Rate limit exceeded",
+            "detail": "Too many requests. Please slow down."
+        },
+    )
+
 
 @app.get("/")
-def root():
+@limiter.limit("5/minute")
+def root(request: Request,):
     return {
         "message": "Welcome to FirstPR API",
         "env":     settings.app_env,
@@ -56,7 +73,8 @@ def root():
 
 
 @app.get("/config")
-def show_config():
+@limiter.limit("5/minute")
+def show_config(request: Request,):
     """Expose non-sensitive runtime config for debugging."""
     return {
         "app_env":          settings.app_env,

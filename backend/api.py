@@ -10,6 +10,7 @@ from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from fastapi import Request
 import json
 
 from schemas import AnalyzeRequest, RepoLoadRequest, RepoQARequest
@@ -23,6 +24,7 @@ from services import (
     run_reasoning_agent,
     run_repo_qa,
 )
+from limiter import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -38,7 +40,7 @@ async def _stream_status(steps: list[tuple[str, any]]) -> AsyncGenerator[str, No
     """
     for label, coro in steps:
         yield json.dumps({"status": label}) + "\n"
-        await asyncio.sleep(0)   # flush to client
+        await asyncio.sleep(0)
         if asyncio.iscoroutine(coro):
             result = await coro
         else:
@@ -49,11 +51,10 @@ async def check_repo_size(repo_url: str, max_mb: int = 500) -> bool:
   """Check the GitHub API to ensure the repo isn't too massive to process."""
   try:
     from utils import parse_github_issue_url
-    # Reusing the regex logic to grab owner/repo
     pattern = r"https://github\.com/([^/]+)/([^/]+)"
     m = re.match(pattern, repo_url.rstrip("/"))
     if not m:
-      return True  # Fallback if URL parsing fails
+      return True
 
     owner, repo = m.group(1), m.group(2)
     api_url = f"https://api.github.com/repos/{owner}/{repo}"
@@ -73,7 +74,8 @@ async def check_repo_size(repo_url: str, max_mb: int = 500) -> bool:
     return True
 
 @router.post("/load-repo")
-async def load_repo(req: RepoLoadRequest):
+@limiter.limit("5/minute")
+async def load_repo(request: Request, req: RepoLoadRequest):
     """
     Clone and index a GitHub repository.
 
@@ -176,7 +178,9 @@ async def _progressive_load(
         yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
 
 @router.post("/analyze-issue")
+@limiter.limit("20/minute")
 async def analyze_issue(
+    request: Request,
     req: AnalyzeRequest,
     generate_patch: bool = Query(
         default=False,
@@ -210,32 +214,102 @@ async def analyze_issue(
     tree          = entry["tree"]
     sources: dict = engine_bundle["sources"]
 
-    issue_title = req.issue_title or ""
-    issue_text  = req.issue_text  or ""
+    issue_title = (
+      (req.issue_title or "")
+      .strip()
+    )
 
+    issue_text = (
+      (req.issue_text or "")
+      .strip()
+    )
     if req.issue_url:
-        try:
-            fetched     = await fetch_github_issue(req.issue_url)
-            issue_title = fetched["title"]
-            issue_text  = fetched["body"]
-            labels_str  = ", ".join(fetched.get("labels", []))
-            if labels_str:
-                issue_text += f"\n\nLabels: {labels_str}"
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        except Exception as exc:
-            logger.error(f"GitHub issue fetch failed: {exc}")
-            raise HTTPException(502, f"Could not fetch GitHub issue: {exc}")
 
-    issue_full = f"Title: {issue_title}\n\n{issue_text}" if issue_title else issue_text
+      try:
 
-    if not issue_full.strip():
-        raise HTTPException(400, "Issue body is empty.")
+        fetched = await fetch_github_issue(
+          req.issue_url
+        )
+
+        issue_title = (
+            fetched.get("title") or ""
+        ).strip()
+
+        issue_text = (
+            fetched.get("body") or ""
+        ).strip()
+
+        labels_str = ", ".join(
+          fetched.get("labels", [])
+        )
+
+        if labels_str:
+          issue_text += (
+            f"\n\nLabels: {labels_str}"
+          )
+
+      except ValueError as exc:
+
+        raise HTTPException(
+          400,
+          str(exc)
+        )
+
+      except Exception as exc:
+
+        logger.error(
+          f"GitHub issue fetch failed: {exc}"
+        )
+
+        raise HTTPException(
+          502,
+          f"Could not fetch GitHub issue: {exc}"
+        )
+
+    if not any([
+      issue_title,
+      issue_text,
+      req.issue_url,
+    ]):
+      raise HTTPException(
+        status_code=422,
+        detail=(
+          "Provide either:\n"
+          "- issue_title\n"
+          "- issue_text\n"
+          "- issue_url"
+        )
+      )
+
+    issue_parts = []
+
+    if issue_title:
+      issue_parts.append(
+        f"Title: {issue_title}"
+      )
+
+    if issue_text:
+      issue_parts.append(issue_text)
+
+    issue_full = "\n\n".join(issue_parts).strip()
+
+    meaningful_tokens = re.findall(
+      r"[a-zA-Z_]{3,}",
+      issue_full
+    )
+
+    if len(meaningful_tokens) < 4:
+      raise HTTPException(
+        status_code=422,
+        detail=(
+          "Issue description is too short. "
+          "Please provide more context."
+        )
+      )
 
     repo_name = get_repo_name(req.repo_url)
 
     async def _run_pipeline():
-        # Run analysis and retrieval concurrently (both are read-only)
         analysis_task  = asyncio.to_thread(run_issue_analyzer, tree, issue_full)
         retrieval_task = asyncio.to_thread(run_retrieval_agent, engine_bundle, issue_full)
 
@@ -259,8 +333,12 @@ async def analyze_issue(
         return {
             "repo_name": repo_name,
             "issue": {
-                "title":  issue_title,
-                "source": req.issue_url or "manual",
+            "title": (
+                issue_title
+                or issue_text[:120]
+                or "Untitled Issue"
+            ),
+            "source": req.issue_url or "manual",
             },
             "analysis":  analysis,
             "retrieval": retrieval,
@@ -290,7 +368,8 @@ async def _streamed_pipeline(issue_full: str, pipeline_coro_factory) -> AsyncGen
         yield json.dumps({"status": "error", "detail": repr(exc)}) + "\n"
 
 @router.post("/ask")
-async def ask_repo(req: RepoQARequest):
+@limiter.limit("30/minute")
+async def ask_repo(request: Request,req: RepoQARequest):
     """Ask a general question about a loaded repository."""
     if not validate_github_url(req.repo_url):
         raise HTTPException(400, "Invalid GitHub URL")
@@ -315,7 +394,8 @@ async def ask_repo(req: RepoQARequest):
     }
 
 @router.get("/repo-status")
-async def repo_status():
+@limiter.limit("5/minute")
+async def repo_status(request: Request,):
     """Return metadata about every repository currently held in memory."""
     repos = []
     for url, entry in repo_cache.items():
@@ -330,7 +410,7 @@ async def repo_status():
     return {"cached_repos": repos}
 
 @router.get("/health")
-async def health():
+async def health(request: Request,):
     in_progress = list(_indexing_in_progress.keys())
     return {
         "status":       "ok",

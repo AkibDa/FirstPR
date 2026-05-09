@@ -10,18 +10,18 @@ from issue_parser import extract_issue_entities
 
 logger = logging.getLogger(__name__)
 
-_W_SYMBOL     = 0.35   # strongest signal: name mentioned in issue ↔ file
-_W_FILEPATH   = 0.25   # second: path semantics match issue domain
-_W_DEP        = 0.15   # third: dependency proximity to anchor file
-_W_AGREEMENT  = 0.15   # fourth: both retrieval methods agree
-_W_RETRIEVAL  = 0.10   # base retrieval score (normalised), tie-breaker
+_W_SYMBOL     = 0.20
+_W_FILEPATH   = 0.20
+_W_DEP        = 0.10
+_W_AGREEMENT  = 0.05
+_W_RETRIEVAL  = 0.45
 
 assert abs(_W_SYMBOL + _W_FILEPATH + _W_DEP + _W_AGREEMENT + _W_RETRIEVAL - 1.0) < 1e-9
 
-TIER_HIGH       = "HIGH"       # composite ≥ 0.55
-TIER_MEDIUM     = "MEDIUM"     # composite ≥ 0.35
-TIER_LOW        = "LOW"        # composite ≥ 0.15
-TIER_PENALISED  = "PENALISED"  # net score < 0.15 after penalty
+TIER_HIGH       = "HIGH"
+TIER_MEDIUM     = "MEDIUM"
+TIER_LOW        = "LOW"
+TIER_PENALISED  = "PENALISED"
 
 _TIER_THRESHOLDS = [
     (0.55, TIER_HIGH),
@@ -29,7 +29,6 @@ _TIER_THRESHOLDS = [
     (0.15, TIER_LOW),
 ]
 
-# Path fragments that suggest low-signal infrastructure
 _PENALTY_PATH_FRAGMENTS: Tuple[str, ...] = (
     "log", "logger", "logging",
     "env", "environ", "environment",
@@ -44,13 +43,11 @@ _PENALTY_PATH_FRAGMENTS: Tuple[str, ...] = (
     "version",
     "health",
     "ping",
-    "init__",         # __init__ files with nothing but imports
+    "init__",
 )
 
-# Base penalty applied when a file matches any fragment above
 _PENALTY_AMOUNT = 0.10
 
-# If the issue text directly names the file stem, the penalty is waived
 _PENALTY_WAIVE_IF_NAMED = True
 
 _FILEPATH_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
@@ -69,9 +66,10 @@ _FILEPATH_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
     "client":      ["client", "http", "request", "fetch", "conn", "socket"],
     "test":        ["test", "spec", "mock", "fixture", "stub"],
     "util":        ["util", "helper", "common", "shared", "misc"],
+    "security":    ["security", "oauth", "scope", "scopes", "jwt", "token", "bearer", "apikey", "openid",],
+    "dependency":  ["dependency", "dependencies", "depends", "inject", "injection",],
 }
 
-# Flatten to a lookup: keyword → domain
 _KW_TO_DOMAIN: Dict[str, str] = {}
 for _domain, _kws in _FILEPATH_DOMAIN_KEYWORDS.items():
     for _kw in _kws:
@@ -82,27 +80,23 @@ for _domain, _kws in _FILEPATH_DOMAIN_KEYWORDS.items():
 class FileRankResult:
     """Full ranking result for a single candidate file."""
     path:              str
-    composite_score:   float            # final weighted score in [0, 1] (before penalty clip)
-    confidence_tier:   str              # HIGH / MEDIUM / LOW / PENALISED
-    retrieval_score:   float            # raw score from retrieval (semantic or bm25)
-    retrieval_method:  str              # "semantic" | "bm25" | "both"
+    composite_score:   float
+    confidence_tier:   str
+    retrieval_score:   float
+    retrieval_method:  str
 
-    # Per-signal scores (all in [0, 1])
     symbol_score:      float = 0.0
     filepath_score:    float = 0.0
     dep_score:         float = 0.0
     agreement_score:   float = 0.0
     penalty:           float = 0.0
 
-    # Matched evidence (for the reasoning agent to cite)
     matched_symbols:   List[str] = field(default_factory=list)
     matched_domains:   List[str] = field(default_factory=list)
-    dep_path:          List[str] = field(default_factory=list)  # hop chain to anchor
+    dep_path:          List[str] = field(default_factory=list)
 
-    # Human-readable reason string
     reason:            str = ""
 
-    # Structural metadata (passed through from retrieval)
     role:              str = ""
     functions:         List[str] = field(default_factory=list)
     classes:           List[str] = field(default_factory=list)
@@ -112,11 +106,11 @@ class FileRankResult:
 class RerankerResult:
     """Full output of the reranker — ranked files plus aggregate metadata."""
     ranked_files:      List[FileRankResult]
-    confidence_tier:   str          # tier of the TOP file
-    overall_confidence: float       # composite score of the top file
-    anchor_file:       Optional[str]  # file with the highest symbol match
-    low_confidence:    bool         # True if even the best file is LOW/PENALISED
-    explanation:       str          # human-readable summary for the reasoning agent
+    confidence_tier:   str
+    overall_confidence: float
+    anchor_file:       Optional[str]
+    low_confidence:    bool
+    explanation:       str
 
 def _extract_issue_symbols(issue_full: str) -> Set[str]:
     """
@@ -129,14 +123,12 @@ def _extract_issue_symbols(issue_full: str) -> Set[str]:
     """
     entities = extract_issue_entities(issue_full)
 
-    # High-confidence symbols only. This directly controls reranker precision.
     symbols = {
         e.text
         for e in entities
         if e.kind == "symbol" and e.confidence >= 0.60
     }
 
-    # Error types can be useful anchors even if not present as defs/classes.
     symbols |= {
         e.text
         for e in entities
@@ -153,12 +145,8 @@ def _extract_issue_domain_keywords(issue_full: str) -> Set[str]:
     """
     text_lower = issue_full.lower()
 
-    # Keep the simple keyword scan but bias toward issues that explicitly mention
-    # tool/runtime/config/middleware style keywords.
     kws = {kw for kw in _KW_TO_DOMAIN if kw in text_lower}
 
-    # If a filepath is present, add path-derived tokens as weak domain hints.
-    # Example: `src/middleware/auth.py` should reinforce middleware/auth.
     entities = extract_issue_entities(issue_full)
     for e in entities:
         if e.kind != "filepath" or e.confidence < 0.70:
@@ -195,7 +183,6 @@ def _symbol_score(
     )
 
     exact_matches = issue_symbols & all_file_symbols
-    # Also check source text substring (case-sensitive, whole-word)
     source_matches = {
         sym for sym in issue_symbols
         if re.search(rf"\b{re.escape(sym)}\b", source)
@@ -205,7 +192,6 @@ def _symbol_score(
     if not matched:
         return 0.0, []
 
-    # Score: log-scaled so 1 match → 0.4, 2 → 0.65, 3+ → ~0.85+
     import math
     score = min(1.0, 0.4 + 0.3 * math.log2(len(matched)))
     return round(score, 3), sorted(matched)
@@ -221,7 +207,6 @@ def _filepath_score(
     Returns (score, matched_domains).
     """
     fp_lower = file_path.lower().replace("\\", "/")
-    # Split on common separators so "tool_runtime" → ["tool", "runtime"]
     segments = re.split(r"[/._\-]", fp_lower)
     segment_set = set(segments)
 
@@ -231,8 +216,22 @@ def _filepath_score(
     if not matched_kws:
         return 0.0, []
 
-    # Each distinct domain hit adds 0.4, capped at 1.0
-    score = min(1.0, 0.4 * len(matched_domains))
+    score = min(1.0, 0.35 * len(matched_domains))
+
+    HIGH_SIGNAL_SEGMENTS = {
+      "security",
+      "oauth",
+      "dependency",
+      "dependencies",
+      "auth",
+      "scope",
+      "scopes",
+    }
+
+    if any(seg in segment_set for seg in HIGH_SIGNAL_SEGMENTS):
+      score += 0.35
+
+    score = min(score, 1.0)
     return round(score, 3), matched_domains
 
 
@@ -254,7 +253,6 @@ def _dependency_score(
     if not anchor_file or file_path == anchor_file:
         return 0.0, []
 
-    # Check if anchor's dep chain contains an edge mentioning this file
     anchor_chain = all_dep_chains.get(anchor_file, [])
     for edge in anchor_chain:
         parts = [p.strip() for p in edge.split("→")]
@@ -267,7 +265,6 @@ def _dependency_score(
             else:
                 return 0.3, [edge]
 
-    # Reverse: does this file's dep chain reach the anchor?
     this_chain = all_dep_chains.get(file_path, [])
     for edge in this_chain:
         parts = [p.strip() for p in edge.split("→")]
@@ -309,14 +306,19 @@ def _penalty_score(
     fp_lower  = file_path.lower().replace("\\", "/")
     file_stem = re.split(r"[/.]", fp_lower)[-2] if "." in fp_lower.split("/")[-1] else fp_lower.split("/")[-1]
 
-    # Check if any penalty fragment matches
     has_penalty_fragment = any(frag in fp_lower for frag in _PENALTY_PATH_FRAGMENTS)
     if not has_penalty_fragment:
         return 0.0
 
-    # Waive if the stem is directly named in the issue
     if _PENALTY_WAIVE_IF_NAMED and file_stem and re.search(rf"\b{re.escape(file_stem)}\b", issue_full, re.IGNORECASE):
         return 0.0
+
+    if (
+        fp_lower.startswith("docs")
+        or "tutorial" in fp_lower
+        or "example" in fp_lower
+    ):
+      return 0.35
 
     return _PENALTY_AMOUNT
 
@@ -337,7 +339,12 @@ def _composite(
         _W_AGREEMENT * agr +
         _W_RETRIEVAL * ret
     )
-    return max(0.0, round(raw - penalty, 4))
+    score = max(0.0, raw - penalty)
+
+    if ret >= 0.70:
+      score = max(score, 0.45)
+
+    return round(min(score, 1.0), 4)
 
 
 def _assign_tier(composite: float) -> str:
@@ -415,15 +422,21 @@ def rerank(
             explanation="No candidate files were retrieved.",
         )
 
-    # --- Pre-compute issue signals (once, shared across all files) ---
     issue_symbols     = _extract_issue_symbols(issue_full)
     issue_domain_kws  = _extract_issue_domain_keywords(issue_full)
 
-    # Separate retrieval method sets for agreement scoring
-    semantic_hits: Set[str] = {fp for fp, (_, m) in candidates.items() if m == "semantic"}
-    bm25_hits:     Set[str] = {fp for fp, (_, m) in candidates.items() if m == "bm25"}
+    semantic_hits: Set[str] = {
+      fp for fp, (_, m)
+      in candidates.items()
+      if m in ("semantic", "dependency")
+    }
 
-    # Normalise raw retrieval scores to [0, 1] relative to this candidate set
+    bm25_hits: Set[str] = {
+      fp for fp, (_, m)
+      in candidates.items()
+      if m in ("bm25", "symbol", "role")
+    }
+
     max_raw = max((s for s, _ in candidates.values()), default=1.0) or 1.0
 
     logger.debug(
@@ -431,7 +444,6 @@ def rerank(
         f"issue_symbols={issue_symbols} | domain_kws={issue_domain_kws}"
     )
 
-    # --- First pass: compute symbol scores to identify the anchor file ---
     sym_scores: Dict[str, Tuple[float, List[str]]] = {}
     for fp, (raw, _) in candidates.items():
         src     = sources.get(fp, "")
@@ -439,18 +451,15 @@ def rerank(
         s, matched = _symbol_score(symbols, issue_symbols, src)
         sym_scores[fp] = (s, matched)
 
-    # Anchor = file with the highest symbol match score
     anchor_file: Optional[str] = max(sym_scores, key=lambda fp: sym_scores[fp][0]) \
         if sym_scores else None
     if anchor_file and sym_scores[anchor_file][0] == 0.0:
-        anchor_file = None   # no file has any symbol match → no meaningful anchor
+        anchor_file = None
 
-    # --- Pre-compute dependency chains for all candidates ---
     all_dep_chains: Dict[str, List[str]] = {}
     for fp in candidates:
         all_dep_chains[fp] = build_dependency_chain(fp, sources, max_depth=3)
 
-    # --- Second pass: compute all signals and build FileRankResult objects ---
     results: List[FileRankResult] = []
 
     for fp, (raw, method) in candidates.items():
@@ -463,7 +472,12 @@ def rerank(
         dep_s, dep_path      = _dependency_score(fp, anchor_file, sources, all_dep_chains)
         agr_s                = _agreement_score(fp, semantic_hits, bm25_hits)
         pen                  = _penalty_score(fp, issue_full)
-        ret_s                = raw / max_raw
+        ret_s = min(raw / max_raw, 1.0)
+
+        if "bm25" in method and fp_s > 0:
+          ret_s += 0.15
+
+        ret_s = min(ret_s, 1.0)
 
         comp = _composite(sym_s, fp_s, dep_s, agr_s, ret_s, pen)
         tier = _assign_tier(comp)
@@ -489,14 +503,11 @@ def rerank(
         r.reason = _build_reason(r)
         results.append(r)
 
-    # --- Sort: composite descending, then penalised files last ---
     results.sort(key=lambda r: (r.confidence_tier == TIER_PENALISED, -r.composite_score))
 
-    # Exclude PENALISED files from the top-k unless we have nothing better
     non_penalised = [r for r in results if r.confidence_tier != TIER_PENALISED]
     top_results   = (non_penalised if non_penalised else results)[:top_k]
 
-    # --- Build aggregate metadata ---
     top_score  = top_results[0].composite_score if top_results else 0.0
     top_tier   = top_results[0].confidence_tier if top_results else TIER_PENALISED
     low_conf   = top_tier in (TIER_LOW, TIER_PENALISED)
