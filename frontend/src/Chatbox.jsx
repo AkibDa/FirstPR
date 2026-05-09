@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Send, ChevronDown, ChevronRight, FileCode, Brain,
-  Search, MapPin, AlertTriangle, CheckCircle, Clock,
+  Search, AlertTriangle, 
   Zap, BookOpen, GitCommit, Wrench, MessageSquare, GitBranch
 } from "lucide-react";
 
@@ -416,7 +416,7 @@ export default function ChatBox({ repoUrl, repoName, onReset }) {
       : { repo_url: repoUrl, question: userMsg };
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000${endpoint}`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
