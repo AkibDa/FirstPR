@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from llama_index.llms.ollama import Ollama
-from llama_index.llms.openai import OpenAI
+from llama_index.llms.openai_like import OpenAILike
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import Settings, Document
 from llama_index.core import VectorStoreIndex, StorageContext
@@ -72,13 +72,19 @@ else:
 if settings.is_production:
     logger.info("Using Remote AMD GPU vLLM Inference")
 
-    Settings.llm = OpenAI(
-        model=settings.llm_model,
-        api_key="dummy-key",
-        api_base=settings.llm_base_url,
-        request_timeout=float(settings.llm_timeout),
-        max_tokens=2048,
-        additional_kwargs={"stop": ["```"]},
+    Settings.llm = OpenAILike(
+      model=settings.llm_model,
+      api_base=settings.llm_base_url,
+      api_key="dummy-key",
+      context_window=32768,
+      is_chat_model=True,
+      tokenizer=None,
+      request_timeout=float(settings.llm_timeout),
+      max_tokens=2048,
+      temperature=0.0,
+      additional_kwargs={
+        "stop": ["```"]
+      },
     )
     logger.info(f"LLM URL: {settings.llm_base_url}")
 
@@ -957,7 +963,16 @@ def run_reasoning_agent(
         f"  - modules:        {', '.join(focus_modules) if focus_modules else '(none)'}\n"
     )
 
-    prompt = f"""{grounding_preamble}
+    prompt = f"""
+  CRITICAL RULES:
+- Return ONLY valid JSON.
+- Do NOT include markdown.
+- Do NOT explain anything outside JSON.
+- Do NOT wrap in ``` blocks.
+- Output MUST start with {{
+- Output MUST end with }}
+
+{grounding_preamble}
 You are a patient, expert open-source mentor helping a BEGINNER make their first contribution.
 Produce a structured contribution guide that is STRICTLY ISSUE-CENTRIC:
 - Focus ONLY on runtime paths, middleware flows, configuration flows, and symbols directly referenced by the issue.
@@ -1058,7 +1073,7 @@ Start your "explanation" with exactly: {uncertainty_note}
         return result
 
     try:
-        resp   = str(Settings.llm.complete(prompt, format="json"))
+        resp   = str(Settings.llm.complete(prompt))
         result = extract_json(resp)
 
         if not result:
