@@ -4,6 +4,8 @@ import os
 import tempfile
 import traceback
 import subprocess
+import httpx
+import re
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Query
@@ -43,6 +45,33 @@ async def _stream_status(steps: list[tuple[str, any]]) -> AsyncGenerator[str, No
             result = coro
     yield json.dumps({"status": "done", "result": result}) + "\n"
 
+async def check_repo_size(repo_url: str, max_mb: int = 500) -> bool:
+  """Check the GitHub API to ensure the repo isn't too massive to process."""
+  try:
+    from utils import parse_github_issue_url
+    # Reusing the regex logic to grab owner/repo
+    pattern = r"https://github\.com/([^/]+)/([^/]+)"
+    m = re.match(pattern, repo_url.rstrip("/"))
+    if not m:
+      return True  # Fallback if URL parsing fails
+
+    owner, repo = m.group(1), m.group(2)
+    api_url = f"[https://api.github.com/repos/](https://api.github.com/repos/){owner}/{repo}"
+
+    async with httpx.AsyncClient(timeout=10) as client:
+      resp = await client.get(api_url)
+      if resp.status_code == 200:
+        size_kb = resp.json().get("size", 0)
+        if (size_kb / 1024) > max_mb:
+          raise HTTPException(
+            400,
+            f"Repository is too large ({(size_kb / 1024):.1f}MB). Maximum allowed is {max_mb}MB."
+          )
+    return True
+  except Exception as e:
+    logger.warning(f"Could not verify repo size: {e}")
+    return True
+
 @router.post("/load-repo")
 async def load_repo(req: RepoLoadRequest):
     """
@@ -59,6 +88,8 @@ async def load_repo(req: RepoLoadRequest):
     """
     if not validate_github_url(req.repo_url):
         raise HTTPException(400, "Invalid GitHub URL")
+
+    await check_repo_size(req.repo_url, max_mb=300)
 
     cache_key = req.repo_url.rstrip("/")
     repo_name = get_repo_name(req.repo_url)

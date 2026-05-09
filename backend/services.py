@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import asyncio
 import json
 import logging
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import Settings, Document
 from llama_index.core import VectorStoreIndex, StorageContext
@@ -50,12 +52,31 @@ Settings.embed_model = HuggingFaceEmbedding(
     embed_batch_size=32,
 )
 
-Settings.llm = Ollama(
+USE_REMOTE_VLLM = os.getenv("USE_REMOTE_VLLM", "false").lower() == "true"
+
+if USE_REMOTE_VLLM:
+  logger.info("Using Remote vLLM (AMD Cloud) for Inference")
+
+  # You will replace this IP with your droplet's IP later
+  VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://YOUR_DROPLET_IP:8000/v1")
+  VLLM_API_KEY = os.getenv("VLLM_API_KEY", "dummy-key")  # vLLM doesn't require a strict key by default
+
+  Settings.llm = OpenAI(
+    model="qwen2.5-coder:1.5b",
+    api_key=VLLM_API_KEY,
+    api_base=VLLM_BASE_URL,
+    request_timeout=300.0,
+    max_tokens=2048,
+    additional_kwargs={"stop": ["```"]}
+  )
+else:
+  logger.info("Using Local Ollama for Inference")
+  Settings.llm = Ollama(
     model="qwen2.5-coder:1.5b",
     base_url="http://localhost:11434",
     request_timeout=300.0,
     context_window=16384,
-)
+  )
 
 _IGNORE_DIRS: frozenset[str] = frozenset({
     "test", "tests", "__tests__", "spec", "specs",
