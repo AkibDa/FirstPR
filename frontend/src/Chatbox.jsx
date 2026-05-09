@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Send, ChevronDown, ChevronRight, FileCode, Brain,
-  Search, MapPin, AlertTriangle, CheckCircle, Clock,
+  Search, AlertTriangle, 
   Zap, BookOpen, GitCommit, Wrench, MessageSquare, GitBranch
 } from "lucide-react";
 
