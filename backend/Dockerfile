@@ -10,7 +10,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV VLLM_BASE_URL="http://vllm-server:8000/v1"
-ENV CHROMA_DB_DIR="/app/chroma_db"
-
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

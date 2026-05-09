@@ -68,6 +68,7 @@ llama-index-embeddings-openai-like==0.3.1
 llama-index-instrumentation==0.5.0
 llama-index-llms-ollama==0.10.1
 llama-index-llms-openai==0.7.7
+llama-index-llms-openai-like==0.7.2
 llama-index-readers-file==0.6.0
 llama-index-vector-stores-chroma==0.5.5
 llama-index-workflows==2.20.0
@@ -156,7 +157,6 @@ tzdata==2026.2
 urllib3==2.6.3
 uuid_utils==0.14.1
 uvicorn==0.46.0
-uvloop==0.22.1
 watchfiles==1.1.1
 websocket-client==1.9.0
 websockets==16.0

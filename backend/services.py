@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from config import settings
 import asyncio
 import json
 import logging
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai_like import OpenAILike
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import Settings, Document
 from llama_index.core import VectorStoreIndex, StorageContext
@@ -44,18 +47,56 @@ device = (
     else "cpu"
 )
 
-Settings.embed_model = HuggingFaceEmbedding(
-    model_name="BAAI/bge-base-en-v1.5",
-    device=device,
-    embed_batch_size=32,
-)
+if settings.is_production:
+    logger.info("Using Remote Embedding Server")
 
-Settings.llm = Ollama(
-    model="qwen2.5-coder:1.5b",
-    base_url="http://localhost:11434",
-    request_timeout=300.0,
-    context_window=16384,
-)
+    from llama_index.embeddings.openai_like import OpenAILikeEmbedding
+
+    Settings.embed_model = OpenAILikeEmbedding(
+        model_name=settings.embed_model,
+        api_base=settings.cloud_embed_url,
+        api_key="dummy-key",
+        embed_batch_size=settings.embed_batch_size,
+    )
+    logger.info(f"Embedding URL: {settings.cloud_embed_url}")
+
+else:
+    logger.info(f"Using Local Embedding Device: {device}")
+
+    Settings.embed_model = HuggingFaceEmbedding(
+        model_name=settings.embed_model,
+        device=device,
+        embed_batch_size=settings.embed_batch_size,
+    )
+
+if settings.is_production:
+    logger.info("Using Remote AMD GPU vLLM Inference")
+
+    Settings.llm = OpenAILike(
+      model=settings.llm_model,
+      api_base=settings.llm_base_url,
+      api_key="dummy-key",
+      context_window=32768,
+      is_chat_model=True,
+      tokenizer=None,
+      request_timeout=float(settings.llm_timeout),
+      max_tokens=2048,
+      temperature=0.0,
+      additional_kwargs={
+        "stop": ["```"]
+      },
+    )
+    logger.info(f"LLM URL: {settings.llm_base_url}")
+
+else:
+    logger.info("Using Local Ollama Inference")
+
+    Settings.llm = Ollama(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        request_timeout=float(settings.llm_timeout),
+        context_window=16384,
+    )
 
 _IGNORE_DIRS: frozenset[str] = frozenset({
     "test", "tests", "__tests__", "spec", "specs",
@@ -109,6 +150,43 @@ _CORE_DIR_HINTS: frozenset[str] = frozenset({
     "util", "utils", "helper", "helpers",
     "middleware",
 })
+
+ARCHITECTURE_QUERIES = [
+    "change model",
+    "where can i change",
+    "deepfake model",
+    "different model",
+    "which model",
+    "model used",
+    "where is the model",
+    "inference pipeline",
+    "how does inference work",
+    "where is prediction done",
+    "where is detection done",
+]
+
+MODEL_KEYWORDS = [
+    "torch.load",
+    "load_model",
+    "state_dict",
+    "EfficientNet",
+    "ResNet",
+    "Xception",
+    "MesoNet",
+    "from_pretrained",
+    "AutoModel",
+    "predict",
+    "inference",
+    "classifier",
+    "weights",
+    ".pth",
+    ".pt",
+    ".onnx",
+    "model =",
+    "DeepFake",
+    "deepfake",
+    "detect",
+]
 
 # Hard limit: never embed more than this many files per repo
 _MAX_EMBED_FILES = 300
@@ -233,7 +311,8 @@ def build_query_engine(content: str, repo_name: str) -> dict:
         ``sources``        – Dict[file_path, source_code]
         ``file_priorities``– Dict[file_path, int] for reranking
     """
-    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", repo_name)[:60] or "repo"
+    repo_hash = hashlib.md5(repo_name.encode()).hexdigest()[:8]
+    safe_name = f"{repo_name}_{repo_hash}"
 
     collection      = _chroma_client.get_or_create_collection(safe_name)
     vector_store    = ChromaVectorStore(chroma_collection=collection)
@@ -409,7 +488,7 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
 
     # --- Stage 1a: Semantic retrieval (wider net for reranker) ---
     try:
-        retriever = vector_index.as_retriever(similarity_top_k=12)
+        retriever = vector_index.as_retriever(similarity_top_k=25)
         nodes: List[NodeWithScore] = retriever.retrieve(issue_full)
         for node in nodes:
             fp    = node.metadata.get("file_path", "")
@@ -448,6 +527,53 @@ def run_retrieval_agent(engine_bundle: dict, issue_full: str) -> dict:
         issue_full  = issue_full,
         top_k       = 6,
     )
+
+    if reranker_result.low_confidence:
+      logger.warning(
+        "Low-confidence retrieval detected — using fallback semantic ranking"
+      )
+
+      fallback_candidates = sorted(
+        candidates.items(),
+        key=lambda x: x[1][0],
+        reverse=True,
+      )[:6]
+
+      relevant_files = []
+
+      for fp, (score, method) in fallback_candidates:
+        relevant_files.append({
+          "path": fp,
+          "relevance": "medium",
+          "score": score,
+          "method": method,
+          "reason": "Fallback semantic retrieval",
+          "functions": [],
+          "classes": [],
+          "role": "unknown",
+          "signals": {
+            "symbol": 0,
+            "filepath": 0,
+            "dep": 0,
+            "agreement": 0,
+            "penalty": 0,
+          },
+          "matched_symbols": [],
+        })
+
+      return {
+        "relevant_files": relevant_files,
+        "key_functions": [],
+        "search_keywords": [],
+        "most_likely_fix_zone": None,
+        "reranker": {
+          "confidence_tier": "LOW",
+          "overall_confidence": 0.0,
+          "anchor_file": None,
+          "low_confidence": True,
+          "explanation": "Fallback semantic retrieval used",
+        },
+      }
 
     logger.info(
         f"Reranker: {len(candidates)} candidates → "
@@ -619,6 +745,51 @@ def _filter_list_of_strings_by_paths(items: list, valid_path_set: set) -> list:
         else:
             logger.warning(f"Stripped hallucinated path from list item: {p!r}")
     return cleaned
+
+def find_model_related_files(sources: Dict[str, str]) -> List[dict]:
+  """
+  Find files most likely related to ML/deepfake model loading,
+  inference, prediction, or weight initialization.
+  """
+
+  scored_files = []
+
+  for fp, src in sources.items():
+    src_lower = src.lower()
+
+    score = 0
+    matched_keywords = []
+
+    for kw in MODEL_KEYWORDS:
+      if kw.lower() in src_lower:
+        score += 1
+        matched_keywords.append(kw)
+
+    # Boost backend/python inference files
+    if fp.endswith(".py"):
+      score += 2
+
+    if any(x in fp.lower() for x in [
+      "model",
+      "infer",
+      "predict",
+      "detect",
+      "service",
+      "backend",
+      "classifier",
+    ]):
+      score += 3
+
+    if score > 0:
+      scored_files.append({
+        "path": fp,
+        "score": score,
+        "matched_keywords": matched_keywords[:10],
+      })
+
+  scored_files.sort(key=lambda x: x["score"], reverse=True)
+
+  return scored_files[:10]
 
 def _generate_patch(
     retrieved_files: List[str],
@@ -792,7 +963,16 @@ def run_reasoning_agent(
         f"  - modules:        {', '.join(focus_modules) if focus_modules else '(none)'}\n"
     )
 
-    prompt = f"""{grounding_preamble}
+    prompt = f"""
+  CRITICAL RULES:
+- Return ONLY valid JSON.
+- Do NOT include markdown.
+- Do NOT explain anything outside JSON.
+- Do NOT wrap in ``` blocks.
+- Output MUST start with {{
+- Output MUST end with }}
+
+{grounding_preamble}
 You are a patient, expert open-source mentor helping a BEGINNER make their first contribution.
 Produce a structured contribution guide that is STRICTLY ISSUE-CENTRIC:
 - Focus ONLY on runtime paths, middleware flows, configuration flows, and symbols directly referenced by the issue.
@@ -893,7 +1073,7 @@ Start your "explanation" with exactly: {uncertainty_note}
         return result
 
     try:
-        resp   = str(Settings.llm.complete(prompt, format="json"))
+        resp   = str(Settings.llm.complete(prompt))
         result = extract_json(resp)
 
         if not result:
@@ -1002,6 +1182,51 @@ def run_repo_qa(engine_bundle: dict, question: str) -> dict:
 
     Grounding: instructs the model to cite only retrieved files and flag gaps.
     """
+    sources: Dict[str, str] = engine_bundle["sources"]
+    question_lower = question.lower()
+
+    # ---------------------------------------------------------
+    # Architecture Query Mode
+    # ---------------------------------------------------------
+
+    is_architecture_query = any(
+      q in question_lower
+      for q in ARCHITECTURE_QUERIES
+    )
+
+    if is_architecture_query:
+      logger.info("Architecture query detected — using structure-aware retrieval")
+
+      model_files = find_model_related_files(sources)
+
+      if not model_files:
+        return {
+          "answer": (
+            "I could not confidently identify the model loading files."
+          ),
+          "relevant_files": [],
+        }
+
+      top_files = model_files[:5]
+
+      formatted_files = "\n".join([
+        f"- {f['path']} (matched: {', '.join(f['matched_keywords'][:5])})"
+        for f in top_files
+      ])
+
+      answer = (
+        "These files are most likely responsible for loading or running "
+        "the deepfake detection model:\n\n"
+        f"{formatted_files}\n\n"
+        "Look for code involving model initialization, weight loading, "
+        "or prediction/inference logic."
+      )
+
+      return {
+        "answer": answer,
+        "relevant_files": [f["path"] for f in top_files],
+      }
+
     retrieval       = run_retrieval_agent(engine_bundle, question)
     retrieved_files = [f["path"] for f in retrieval.get("relevant_files", [])]
     sources: Dict[str, str] = engine_bundle["sources"]
@@ -1013,7 +1238,6 @@ def run_repo_qa(engine_bundle: dict, question: str) -> dict:
     prompt = f"""You are an expert AI mentor helping a developer understand a codebase.
 Answer the question using ONLY the source code provided. Do not reference files not listed below.
 If the answer cannot be found in the context, say so clearly.
-
 
 Files you may reference:
 {valid_paths}
@@ -1027,8 +1251,16 @@ Format your answer in clean Markdown. Cite specific function or class names from
     try:
         answer = str(Settings.llm.complete(prompt)).strip()
     except Exception as exc:
-        logger.error(f"QA agent error: {exc}")
-        answer = "I encountered an error while generating an answer."
+        logger.exception("QA agent failed")
+
+        return {
+          "answer": (
+            "The QA agent failed to generate a grounded response. "
+            "Please check the inference server or Ollama connection."
+          ),
+          "relevant_files": [],
+          "error": str(exc),
+        }
 
     return {
         "answer":         answer,
