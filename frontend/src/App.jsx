@@ -241,11 +241,14 @@ export default function App() {
   const [repoUrl, setRepoUrl] = useState('');
   const [repoName, setRepoName] = useState('');
   const [booted, setBooted] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState('');
 
   const handleLoadRepo = async (e) => {
     e.preventDefault();
     if (!repoUrl) return;
+    
     setAppState('loading');
+    setLoadingStatus('connecting...'); 
 
     try {
       const res = await fetch('http://127.0.0.1:8000/api/load-repo', {
@@ -254,19 +257,47 @@ export default function App() {
         body: JSON.stringify({ repo_url: repoUrl }),
       });
 
-      const text = await res.text();
-      const lines = text.trim().split('\n');
-      const finalResponse = lines[lines.length - 1];
-      const data = JSON.parse(finalResponse);
-      if (res.ok && (data.status === 'done' || data.status === 'loaded' || data.status === 'cached')) {
-        setRepoName(data.repo_name);
-        setAppState('chat');
-      } else {
-        alert('Failed to load repo: ' + (data.detail || 'Unknown error'));
-        setAppState('landing');
+      if (!res.body) throw new Error("No response body");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+      
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          try {
+            const data = JSON.parse(line);
+           
+            setLoadingStatus(data.status); 
+
+            if (data.status === 'cached' || data.status === 'done' || data.status === 'loaded') {
+             
+              setRepoName(data.repo_name || data.result?.repo_name);
+              setAppState('chat');
+              return; 
+            } else if (data.status === 'error') {
+              alert('Failed to load repo: ' + data.detail);
+              setAppState('landing');
+              return;
+            }
+          } catch (err) {
+            console.warn("Failed to parse stream chunk", line);
+          }
+        }
       }
     } catch (error) {
-      console.error("Repo load error", error);
+      console.error(error);
+      alert('Connection error. Is the backend running?');
       setAppState('landing');
     }
   };
@@ -443,11 +474,14 @@ export default function App() {
                 />
               </div>
               <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 13, color: 'var(--green)', letterSpacing: 2, marginBottom: 6 }}>
-                  CLONING REPOSITORY
+                <div style={{ fontSize: 13, color: 'var(--green)', letterSpacing: 2, marginBottom: 6, textTransform: 'uppercase' }}>
+                  {loadingStatus === 'cloning' ? 'CLONING REPOSITORY' :
+                   loadingStatus === 'cached' ? 'LOADING FROM CACHE' :
+                   loadingStatus === 'done' ? 'INDEXING COMPLETE' :
+                   'INDEXING CODEBASE'}
                 </div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: 1 }}>
-                  indexing codebase... please wait
+                  status: {loadingStatus}... please wait
                 </div>
               </div>
               {/* Progress bar */}

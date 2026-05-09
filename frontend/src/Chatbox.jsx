@@ -293,15 +293,33 @@ function IssueAnalysisCard({ data }) {
           </Accordion>
         )}
 
-        {/* Patch */}
-        {reasoning.suggested_patch && (
-          <Accordion title="SUGGESTED PATCH" icon={Wrench} accent={true}>
+        {/* Low Confidence Warning (New Feature!) */}
+        {reasoning.localisation_confidence?.low_confidence && (
+          <div style={{ 
+            display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10,
+            background: "rgba(200,60,60,0.1)", border: "1px solid rgba(200,60,60,0.3)", 
+            padding: "10px 14px", borderRadius: 3 
+          }}>
+            <AlertTriangle size={14} color="#c83c3c" style={{ flexShrink: 0, marginTop: 2 }} />
+            <span style={{ color: "#c83c3c", fontSize: 11, lineHeight: 1.5 }}>
+              <strong style={{ letterSpacing: 1 }}>LOW CONFIDENCE:</strong> {reasoning.localisation_confidence.explanation}
+            </span>
+          </div>
+        )}
+
+        {/* Patch (Fixed!) */}
+        {reasoning.suggested_patch && reasoning.suggested_patch.diff && (
+          <Accordion 
+            title={`SUGGESTED PATCH (${reasoning.suggested_patch.file_path})`} 
+            icon={Wrench} 
+            accent={true}
+          >
             <pre style={{
               color: "#00b432", fontSize: 10, lineHeight: 1.6, overflowX: "auto",
               whiteSpace: "pre-wrap", wordBreak: "break-word",
               fontFamily: "'JetBrains Mono', monospace",
             }}>
-              {reasoning.suggested_patch}
+              {reasoning.suggested_patch.diff}
             </pre>
           </Accordion>
         )}
@@ -309,6 +327,7 @@ function IssueAnalysisCard({ data }) {
     </div>
   );
 }
+      
 
 function QAAnswerCard({ data }) {
   return (
