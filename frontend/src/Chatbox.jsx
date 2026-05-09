@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Send, ChevronDown, ChevronRight, FileCode, Brain,
   Search, MapPin, AlertTriangle, CheckCircle, Clock,
-  Zap, BookOpen, GitCommit, Wrench, MessageSquare
+  Zap, BookOpen, GitCommit, Wrench, MessageSquare, GitBranch
 } from "lucide-react";
 
 
@@ -479,6 +479,7 @@ export default function ChatBox({ repoUrl, repoName, onReset }) {
             padding: "5px 10px", display: "flex", alignItems: "center", gap: 6,
             background: "rgba(0,180,50,0.06)",
           }}>
+            <GitBranch size={15} color="#00ff41" /> {/* Added Logo Here */}
             <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: 1, color: "#00cc2e" }}>
               {repoName.toUpperCase()}
             </span>
