@@ -416,7 +416,7 @@ export default function ChatBox({ repoUrl, repoName, onReset }) {
       : { repo_url: repoUrl, question: userMsg };
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000${endpoint}`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
