@@ -307,14 +307,3 @@ Contributions are welcome! Please follow these steps:
 ## 📄 License
 
 This project is part of FirstPR and is open source under the MIT License.
-
-## 🙏 Acknowledgments
-
-- **Vite Team** - For the amazing build tool
-- **React Team** - For the incredible framework
-- **Tailwind Labs** - For the utility-first CSS framework
-- **Framer** - For the animation library
-
----
-
-**Built with 💚 and a love for retro aesthetics**
