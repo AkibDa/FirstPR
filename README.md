@@ -248,7 +248,8 @@ This project is open source and available under the MIT License.
 
 ## 👥 Authors
 
-- **Akib Da** - [GitHub](https://github.com/AkibDa)
+- **Sk Akib Ahammed** - [GitHub](https://github.com/AkibDa)
+- **Jeet Sarkar** - [GitHub](https://github.com/StackUnderflow10)
 
 ## 🙏 Acknowledgments
 
